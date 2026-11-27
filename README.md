@@ -93,12 +93,17 @@ herdr server reload-config
    The first analysis starts right away. Follow it in the status bar or the
    Activity tab.
 3. After that, spook updates whenever one of those agents finishes a turn.
-4. Press `m` to create more Missions and switch between them.
+4. Press `m` for the Missions tab, where you create Missions and switch between
+   them.
 
 | Key | Action |
 | --- | --- |
 | `?` | Open the Help tab (again to go back) |
-| `m` | Missions: switch, create, edit (name and scope), delete |
+| `m` | Go to the Missions tab |
+| `enter` | Missions tab: make the selected Mission current and show its tasks |
+| `n` | Missions tab: new Mission (on the Tasks tab, `n` is notes) |
+| `e` | Missions tab: edit the selected Mission's name and scope |
+| `delete` | Missions tab: delete the selected Mission (asks first) |
 | `w` | Choose the agents on this Mission (`space` toggles, `s` saves, `esc` cancels) |
 | `r` | Re-analyze every agent on a Mission now |
 | `g` | Jump to the agent behind the selected task or row (on an unowned task, offers to start one) |
@@ -128,6 +133,10 @@ or "Security review". It holds:
   hidden tasks and briefs. They belong to that Mission only.
 
 The board shows one Mission at a time. The status line starts with its name.
+The **Missions** tab lists them all, with agents, open tasks, alerts and when
+each was last updated. Selecting one shows its scope, its agents (and which
+other Missions they're on) and its concerns. `w` on that tab edits the
+selected Mission's agents.
 
 - **Agents that leave a Mission:** if you remove an agent, its tasks stay on
   the Mission under "Agents removed from this Mission", with your notes and
@@ -138,7 +147,7 @@ The board shows one Mission at a time. The status line starts with its name.
   its alias.
 - **New agents aren't added automatically.** Add them with `w`. Agents you
   start from the board with `a` join the current Mission.
-- **Deleting a Mission** (`m`, then delete) asks first. Its folder moves to
+- **Deleting a Mission** (Missions tab, `delete`) asks first. Its folder moves to
   `missions/_deleted/` in the state directory, so it can be recovered by hand.
 
 Upgrading from 1.0: the first run moves your existing board into a Mission

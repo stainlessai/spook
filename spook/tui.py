@@ -59,6 +59,10 @@ def _trigger_sync() -> None:
 
 
 class AgentPicker(ModalScreen[None]):
+    def __init__(self, mission: str | None = None) -> None:
+        super().__init__()
+        self.mission = mission or missions.active()
+
     """Choose which agents are on the active Mission. Agents can be on several Missions."""
 
     BINDINGS = [Binding("s", "save", "Save"), Binding("escape", "cancel", "Cancel")]
@@ -70,7 +74,7 @@ class AgentPicker(ModalScreen[None]):
     """
 
     def compose(self) -> ComposeResult:
-        mid = missions.active()
+        mid = self.mission
         mine = missions.members(mid)
         aliases = read_json(state_dir() / "aliases.json", {})
         ws_labels = {w["workspace_id"]: w.get("label") or w["workspace_id"] for w in herdr.workspaces()}
@@ -93,7 +97,7 @@ class AgentPicker(ModalScreen[None]):
         self.dismiss(None)
 
     def action_save(self) -> None:
-        mid = missions.active()
+        mid = self.mission
         chosen = set(self.query_one(SelectionList).selected)
         mine = set(missions.members(mid))
         changed = False
@@ -145,91 +149,6 @@ class MissionForm(ModalScreen[dict | None]):
                           "scope": self.query_one("#mscope", TextArea).text.strip()})
         elif event.button.id == "cancel":
             self.dismiss(None)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-
-class MissionsScreen(ModalScreen[str | None]):
-    """Switch, create, edit or delete Missions. Returns the Mission to show."""
-
-    BINDINGS = [Binding("escape", "cancel", "Close"), Binding("n", "new", "New"),
-                Binding("e", "edit", "Edit"), Binding("delete,backspace", "delete", "Delete")]
-    DEFAULT_CSS = """
-    MissionsScreen { align: center middle; }
-    #mbox { width: 96%; max-width: 90; height: auto; max-height: 90%; border: round $accent;
-            padding: 1 2; background: $panel; }
-    #mlist { height: auto; max-height: 20; }
-    """
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="mbox"):
-            yield Label("Missions   enter: switch · n: new · e: edit · delete: delete · esc: close")
-            yield OptionList(id="mlist")
-
-    def on_mount(self) -> None:
-        self._reload()
-
-    def _reload(self) -> None:
-        ol = self.query_one("#mlist", OptionList)
-        ol.clear_options()
-        act = missions.active()
-        self.ids = list(missions.all_missions())
-        for mid in self.ids:
-            m = missions.all_missions()[mid]
-            n = len(missions.members(mid))
-            scope = f" — {m['scope'][:50]}" if m.get("scope") else ""
-            ol.add_option(f"{'● ' if mid == act else '  '}{m['name']}  ({n} agents){scope}")
-        ol.highlighted = self.ids.index(act) if act in self.ids else 0
-        ol.focus()
-
-    def _current(self) -> str | None:
-        ol = self.query_one("#mlist", OptionList)
-        return self.ids[ol.highlighted] if ol.highlighted is not None else None
-
-    def on_option_list_option_selected(self, event) -> None:
-        mid = self._current()
-        if mid:
-            missions.set_active(mid)
-            self.dismiss(mid)
-
-    def action_new(self) -> None:
-        def made(res):
-            if res:
-                self.dismiss(missions.create(res["name"], res["scope"]))
-        self.app.push_screen(MissionForm("New Mission"), made)
-
-    def action_edit(self) -> None:
-        mid = self._current()
-        if not mid:
-            return
-        m = missions.all_missions()[mid]
-
-        def saved(res):
-            if res:
-                missions.update(mid, name=res["name"], scope=res["scope"])
-                self._reload()
-        self.app.push_screen(MissionForm(f"Edit Mission '{m['name']}'", m["name"], m.get("scope", "")), saved)
-
-    def action_delete(self) -> None:
-        mid = self._current()
-        if not mid:
-            return
-        if len(self.ids) == 1:
-            self.app.notify("Can't delete the only Mission", severity="warning")
-            return
-        name = missions.all_missions()[mid]["name"]
-
-        def done(yes: bool) -> None:
-            if yes and missions.delete(mid):
-                self.app.notify(f"Mission '{name}' deleted")
-                self._reload()
-        self.app.push_screen(Confirm(
-            f"Delete Mission '{name}'?\n\nIts task graph, notes, trash and decisions go with it. "
-            "Agents and their summaries are not affected. The folder is kept in the state "
-            "directory under missions/_deleted, so it can be recovered by hand.",
-            "Delete Mission",
-        ), done)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -429,7 +348,10 @@ class Board(App):
     #--content-tab-tab_help { dock: right; }
     #tree, #agents { width: 50%; }
     #act_head { height: auto; padding: 0 1; color: $text-muted; border-bottom: solid $primary-darken-2; }
-    #calls, #trash { width: 50%; }
+    #calls, #trash, #missions { width: 50%; }
+    #mission_box { width: 50%; border-left: solid $primary-darken-2; padding: 0 1; }
+    .narrow #missions { width: 100%; height: 40%; }
+    .narrow #mission_box { width: 100%; height: 60%; border-left: none; border-top: solid $primary-darken-2; }
     #trash_box { width: 50%; border-left: solid $primary-darken-2; padding: 0 1; }
     .narrow #trash { width: 100%; height: 55%; }
     .narrow #trash_box { width: 100%; height: 45%; border-left: none; border-top: solid $primary-darken-2; }
@@ -449,6 +371,8 @@ class Board(App):
         Binding("r", "sync", "Re-analyze"),
         Binding("w", "agents", "Agents on Mission"),
         Binding("m", "missions", "Missions"),
+        Binding("e", "mission_edit", "Edit Mission"),
+        Binding("delete", "mission_delete", "Delete Mission"),
         Binding("g", "goto", "Jump to agent"),
         Binding("a", "assign", "Start agent"),
         Binding("c", "close_task", "Done"),
@@ -464,9 +388,17 @@ class Board(App):
             ("?", "Help", "Open this tab; press again to go back."),
             ("q / esc", "Close", "Close the board. Analysis keeps running in the background."),
             ("r", "Re-analyze", "Re-read every agent on a Mission and rebuild the task graphs now."),
-            ("m", "Missions", "Switch Missions, or create, edit (name and scope) or delete one."),
+            ("m", "Missions", "Go to the Missions tab."),
             ("w", "Agents on Mission", "Choose which agents are on this Mission. An agent can be on "
              "several Missions."),
+        ]),
+        ("Missions", [
+            ("enter", "Open", "Make the selected Mission current and show its tasks."),
+            ("n", "New", "Create a Mission: name and scope."),
+            ("e", "Edit", "Change the selected Mission's name or scope."),
+            ("w", "Agents", "Choose the selected Mission's agents."),
+            ("delete", "Delete", "Delete the selected Mission (asks first; its folder is kept under "
+             "missions/_deleted for recovery). Agents and their summaries are unaffected."),
         ]),
         ("Tasks", [
             ("↑ ↓ / enter", "Move / fold", "Move through concerns, tasks and alerts; enter folds a group."),
@@ -506,7 +438,12 @@ class Board(App):
 
     def compose(self) -> ComposeResult:
         yield Static(id="status")
-        with TabbedContent():
+        with TabbedContent(initial="tab_tasks"):
+            with TabPane("Missions", id="tab_missions"):
+                with Horizontal(classes="split"):
+                    yield DataTable(id="missions", cursor_type="row")
+                    with VerticalScroll(id="mission_box"):
+                        yield Markdown(id="mission_detail")
             with TabPane("Tasks", id="tab_tasks"):
                 with Horizontal(classes="split"):
                     yield Tree("tasks", id="tree")
@@ -541,6 +478,8 @@ class Board(App):
         t.add_columns("id", "workspace", "status", "phase", "about")
         self.query_one("#calls", DataTable).add_columns("", "started", "what", "model", "time", "cost")
         self.query_one("#trash", DataTable).add_columns("id", "status", "title", "trashed")
+        self.query_one("#missions", DataTable).add_columns("", "Mission", "agents", "open", "alerts", "updated")
+        self._missions_sig = None
         self.trash: dict = {}
         self.calls: list[dict] = []
         self.screen.set_class(self.size.width < self.NARROW_COLS, "narrow")
@@ -578,7 +517,7 @@ class Board(App):
             out.append("")
         return "\n".join(out)
 
-    FOCUS_IN_TAB = {"tab_tasks": "#tree", "tab_agents": "#agents", "tab_activity": "#calls",
+    FOCUS_IN_TAB = {"tab_missions": "#missions", "tab_tasks": "#tree", "tab_agents": "#agents", "tab_activity": "#calls",
                     "tab_trash": "#trash", "tab_help": "#help_box"}
 
     def _switch_tab(self, tab: str) -> None:
@@ -627,6 +566,12 @@ class Board(App):
             self.trash = load_trash()
             self._render_tree()
             self._render_trash()
+        all_m = list(missions.all_missions())
+        msig = self._mtimes([d / "missions.json"] + [state_dir() / "missions" / m / f
+                                                     for m in all_m for f in ("graph.json", "agents.json")])
+        if msig != self._missions_sig:
+            self._missions_sig = msig
+            self._render_missions()
         status = read_json(state_dir() / "status.json", {})
         self.calls, self.syncs = activity.load()
         self._render_status(status)
@@ -892,6 +837,9 @@ class Board(App):
         return "\n".join(out)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.data_table.id == "missions":
+            self._show_mission(event.row_key.value if event.row_key else None)
+            return
         if event.data_table.id == "trash":
             tid = event.row_key.value if event.row_key else None
             e = self.trash.get(tid)
@@ -944,15 +892,133 @@ class Board(App):
         _trigger_sync()
         self.notify("Re-analysis started")
 
-    def action_agents(self) -> None:
-        self.push_screen(AgentPicker(), lambda _: self.poll())
+    # ---------------------------------------------------------------- Missions tab
+
+    def _render_missions(self) -> None:
+        table = self.query_one("#missions", DataTable)
+        keep = table.cursor_row
+        table.clear()
+        act = missions.active()
+        for mid, m in missions.all_missions().items():
+            g = read_json(missions.mission_dir(mid) / "graph.json", {})
+            tasks = g.get("tasks", [])
+            open_ = len([t for t in tasks if t["status"] not in ("done", "dropped")])
+            table.add_row(
+                Text("●", style="bold green") if mid == act else "",
+                Text(m["name"], style="bold" if mid == act else ""),
+                str(len(missions.members(mid))),
+                str(open_),
+                str(len(g.get("alerts", []))),
+                _ago(g.get("updated_at")) if g.get("updated_at") else "—",
+                key=mid,
+            )
+        if table.row_count:
+            table.move_cursor(row=min(keep, table.row_count - 1))
+
+    def _mission_cursor(self) -> str | None:
+        table = self.query_one("#missions", DataTable)
+        if not table.row_count:
+            return None
+        return table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+
+    def _show_mission(self, mid: str | None) -> None:
+        md = self.query_one("#mission_detail", Markdown)
+        if not mid or mid not in missions.all_missions():
+            md.update("")
+            return
+        m = missions.all_missions()[mid]
+        names = {k: v["name"] for k, v in missions.all_missions().items()}
+        g = read_json(missions.mission_dir(mid) / "graph.json", {})
+        recs = mission_records(mid)
+        out = [f"## {m['name']}" + ("  (current)" if mid == missions.active() else ""), "",
+               "**Scope**: " + (m.get("scope") or "_none: all of the agents' work is included_"), "",
+               "### Agents"]
+        if not recs and not missions.members(mid):
+            out.append("_None yet. Press w to add some._")
+        for r in recs:
+            others = [names[o] for o in missions.missions_for_session(r["session_id"]) if o != mid]
+            state = "closed" if r.get("gone") else (r.get("agent_status") or "?")
+            line = f"- **{r['alias']}**: {r['record'].get('title', '')} · {r['workspace']} · {state}"
+            if others:
+                line += f" · also on: {', '.join(others)}"
+            out.append(line)
+        waiting = len(missions.members(mid)) - len(recs)
+        if waiting > 0:
+            out.append(f"- _{waiting} more not analyzed yet_")
+        concerns = g.get("concerns", [])
+        if concerns:
+            out += ["", "### Concerns"]
+            for c in concerns:
+                n = len([t for t in g.get("tasks", []) if t.get("concern_id") == c["id"]
+                         and t["status"] not in ("done", "dropped")])
+                out.append(f"- {c['name']}: {n} open" + (" · crosscutting" if c.get("crosscutting") else ""))
+        out += ["", "_enter: open · n: new · e: edit · w: agents · delete: delete_"]
+        md.update("\n".join(out))
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id != "missions" or not event.row_key:
+            return
+        missions.set_active(event.row_key.value)
+        self.poll()
+        self._switch_tab("tab_tasks")
+        self.notify(f"Mission: {missions.info()['name']}")
+
+    def _on_missions_tab(self) -> bool:
+        return self.query_one(TabbedContent).active == "tab_missions"
 
     def action_missions(self) -> None:
-        def chosen(mid):
-            self.poll()
-            if mid:
-                self.notify(f"Mission: {missions.info(mid)['name']}")
-        self.push_screen(MissionsScreen(), chosen)
+        self._switch_tab("tab_missions")
+
+    def action_agents(self) -> None:
+        mid = self._mission_cursor() if self._on_missions_tab() else None
+        self.push_screen(AgentPicker(mid), lambda _: self.poll())
+
+    def _mission_new(self) -> None:
+        def made(res):
+            if res:
+                missions.create(res["name"], res["scope"])
+                self.poll()
+                self.notify(f"Mission '{res['name']}' created. Press w to add agents.")
+        self.push_screen(MissionForm("New Mission"), made)
+
+    def action_mission_edit(self) -> None:
+        if not self._on_missions_tab():
+            return
+        mid = self._mission_cursor()
+        if not mid:
+            return
+        m = missions.all_missions()[mid]
+
+        def saved(res):
+            if res:
+                missions.update(mid, name=res["name"], scope=res["scope"])
+                self._missions_sig = None
+                self.poll()
+                self._show_mission(mid)
+        self.push_screen(MissionForm(f"Edit Mission '{m['name']}'", m["name"], m.get("scope", "")), saved)
+
+    def action_mission_delete(self) -> None:
+        if not self._on_missions_tab():
+            return
+        mid = self._mission_cursor()
+        if not mid:
+            return
+        if len(missions.all_missions()) == 1:
+            self.notify("Can't delete the only Mission", severity="warning")
+            return
+        name = missions.all_missions()[mid]["name"]
+
+        def done(yes: bool) -> None:
+            if yes and missions.delete(mid):
+                self.notify(f"Mission '{name}' deleted")
+                self._missions_sig = None
+                self.poll()
+        self.push_screen(Confirm(
+            f"Delete Mission '{name}'?\n\nIts task graph, notes, trash and decisions go with it. "
+            "Agents and their summaries are not affected. The folder is kept in the state "
+            "directory under missions/_deleted, so it can be recovered by hand.",
+            "Delete Mission",
+        ), done)
 
     def action_close_task(self) -> None:
         if self.query_one(TabbedContent).active != "tab_tasks":
@@ -1093,6 +1159,9 @@ class Board(App):
             self.exit()
 
     def action_notes(self) -> None:
+        if self._on_missions_tab():
+            self._mission_new()  # n means "new" on the Missions tab.
+            return
         if self.query_one(TabbedContent).active != "tab_tasks":
             return
         task = self._selected_task()
