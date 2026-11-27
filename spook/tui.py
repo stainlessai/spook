@@ -14,7 +14,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual import work
 from textual.widgets import (
-    Button, DataTable, Footer, Input, Label, Markdown, Select, SelectionList, Static, TabbedContent,
+    Button, DataTable, Input, Label, Markdown, Select, SelectionList, Static, TabbedContent,
     TabPane, TextArea, Tree,
 )
 
@@ -26,7 +26,7 @@ ICON = {
     "open": ("○", "white"),
     "in_progress": ("◐", "cyan"),
     "blocked": ("■", "red"),
-    "done": ("✓", "green"),
+    "done": ("✓", "green3"),
     "dropped": ("✗", "grey50"),
 }
 SEV = {"critical": ("‼", "bold red"), "warn": ("!", "yellow"), "info": ("i", "blue")}
@@ -177,6 +177,7 @@ class Board(App):
     TITLE = "spook"
     CSS = """
     #status { height: auto; padding: 0 1; background: $boost; }
+    #keys { dock: bottom; height: 2; padding: 0 1; background: $boost; }
     #tree, #agents { width: 50%; }
     #act_head { height: auto; padding: 0 1; color: $text-muted; border-bottom: solid $primary-darken-2; }
     #calls { width: 50%; }
@@ -196,12 +197,13 @@ class Board(App):
         Binding("w", "workspaces", "Workspaces"),
         Binding("g", "goto", "Go to agent"),
         Binding("a", "assign", "Start agent"),
-        Binding("d", "toggle_done", "Show/hide done"),
+        Binding("x", "hide_task", "Hide done task"),
+        Binding("d", "toggle_hidden", "Show hidden"),
     ]
 
     def __init__(self) -> None:
         super().__init__()
-        self.show_done = False
+        self.show_hidden = False
         self.graph: dict = {}
         self.records: dict[str, dict] = {}  # alias -> agent record
         self._sig = None
@@ -229,7 +231,7 @@ class Board(App):
                         yield DataTable(id="calls", cursor_type="row")
                         with VerticalScroll(id="call_box"):
                             yield Markdown(id="call_detail")
-        yield Footer()
+        yield Static(id="keys")
 
     def on_mount(self) -> None:
         tree = self.query_one(Tree)
@@ -239,6 +241,7 @@ class Board(App):
         self.query_one("#calls", DataTable).add_columns("", "started", "what", "model", "time", "cost")
         self.calls: list[dict] = []
         self.screen.set_class(self.size.width < self.NARROW_COLS, "narrow")
+        self._render_keys(self.size.width)
         self._register_pane(True)
         self.poll()
         self.set_interval(1, self.poll)
@@ -254,6 +257,8 @@ class Board(App):
             return
         p = state_dir() / "board_panes.json"
         panes = read_json(p, {})
+        # Boards closed with the pane (not q) never unregister; drop ones whose process is gone.
+        panes = {k: v for k, v in panes.items() if activity._alive(v.get("pid"))}
         if on:
             panes[pane] = {"size": [self.size.width, self.size.height], "pid": os.getpid()}
         else:
@@ -262,6 +267,28 @@ class Board(App):
 
     def on_resize(self, event) -> None:
         self.screen.set_class(event.size.width < self.NARROW_COLS, "narrow")
+        self._render_keys(event.size.width)
+
+    def _render_keys(self, width: int) -> None:
+        """Key guide packed into two rows, breaking only between keys."""
+        items = []
+        for b in self.BINDINGS:
+            key = b.key.split(",")[0]
+            label = "Hide hidden" if (b.action == "toggle_hidden" and self.show_hidden) else b.description
+            item = Text(f"{key} {label}")
+            item.stylize("bold orange1", 0, len(key))
+            items.append(item)
+        avail = max(20, width - 2)
+        rows: list[Text] = [Text()]
+        for it in items:
+            sep = 3 if rows[-1].plain else 0
+            if rows[-1].plain and len(rows[-1].plain) + sep + len(it.plain) > avail and len(rows) < 2:
+                rows.append(Text())
+                sep = 0
+            if sep:
+                rows[-1].append("   ")
+            rows[-1].append_text(it)
+        self.query_one("#keys", Static).update(Text("\n").join(rows))
 
     # ---------------------------------------------------------------- data
 
@@ -290,8 +317,9 @@ class Board(App):
     def _render_status(self, s: dict) -> None:
         g = self.graph
         n_t = len([x for x in g.get("tasks", []) if x["status"] not in ("done", "dropped")])
+        n_done = len([x for x in g.get("tasks", []) if x["status"] == "done"])
         n_a = len(g.get("alerts", []))
-        left = f"{len(tracked())} workspaces · {len(self.records)} agents · {n_t} open tasks · {n_a} alerts"
+        left = f"{len(tracked())} workspaces · {len(self.records)} agents · {n_t} open · {n_done} done · {n_a} alerts"
         if not tracked():
             left = "No workspaces tracked yet — press w to pick some"
         running = [c for c in self.calls if c["state"] == "running"]
@@ -369,14 +397,20 @@ class Board(App):
 
     def _task_label(self, t: dict, by_id: dict) -> Text:
         icon, color = ICON.get(t["status"], ("?", "white"))
-        txt = Text.assemble((f"{icon} ", color), (f"{t['id']} ", "bold"), t["title"])
+        finished = t["status"] in ("done", "dropped")
+        title_style = "grey62" if finished else ""
+        if t["id"] in self.hidden:
+            title_style = "grey42 italic"
+        txt = Text.assemble((f"{icon} ", f"bold {color}"), (f"{t['id']} ", "bold"), (t["title"], title_style))
         if t.get("projects"):
             txt.append(f"  · {', '.join(t['projects'])}", style="grey62")
         waiting = [d for d in t.get("depends_on", []) if by_id.get(d, {}).get("status") not in ("done", "dropped")]
         if waiting:
             txt.append(f"  ← {', '.join(waiting)}", style="yellow")
-        if not t.get("owners"):
+        if not t.get("owners") and not finished:
             txt.append("  unowned", style="magenta")
+        if t["id"] in self.hidden:
+            txt.append("  hidden", style="grey42")
         return txt
 
     def _render_tree(self) -> None:
@@ -385,7 +419,11 @@ class Board(App):
         self._rebuilding = True  # Ignore the highlight events clear() and rebuild fire.
         tree.clear()
         g = self.graph
-        tasks = [t for t in g.get("tasks", []) if self.show_done or t["status"] not in ("done", "dropped")]
+        # Hiding only applies while a task is finished; if it reopens, it shows again.
+        tasks = [
+            t for t in g.get("tasks", [])
+            if self.show_hidden or t["id"] not in self.hidden or t["status"] not in ("done", "dropped")
+        ]
         by_id = {t["id"]: t for t in g.get("tasks", [])}
 
         alerts = g.get("alerts", [])
@@ -551,8 +589,35 @@ class Board(App):
     def action_workspaces(self) -> None:
         self.push_screen(Workspaces(), lambda _: self.poll())
 
-    def action_toggle_done(self) -> None:
-        self.show_done = not self.show_done
+    @property
+    def hidden(self) -> set[str]:
+        return set(read_json(state_dir() / "hidden_tasks.json", []))
+
+    def action_hide_task(self) -> None:
+        key = self._current_key()
+        task = next((t for t in self.graph.get("tasks", []) if key and key[0] == "task" and t["id"] == key[1]), None)
+        if not task:
+            self.notify("Select a task first", severity="warning")
+            return
+        hidden = self.hidden
+        if task["id"] in hidden:
+            hidden.discard(task["id"])
+            self.notify(f"{task['id']} unhidden")
+        elif task["status"] in ("done", "dropped"):
+            hidden.add(task["id"])
+            self.notify(f"{task['id']} hidden (d shows hidden tasks)")
+        else:
+            self.notify("Only completed tasks can be hidden", severity="warning")
+            return
+        # Move off the row first so the cursor lands on a neighbour, not the top.
+        if not self.show_hidden and task["id"] in hidden:
+            self.query_one(Tree).action_cursor_down()
+        write_json(state_dir() / "hidden_tasks.json", sorted(hidden))
+        self._render_tree()
+
+    def action_toggle_hidden(self) -> None:
+        self.show_hidden = not self.show_hidden
+        self._render_keys(self.size.width)
         self._render_tree()
 
     def action_goto(self) -> None:

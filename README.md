@@ -17,6 +17,7 @@ unowned task, which happens only after you confirm it (see below).
 - **Tasks:** work grouped into concerns, with crosscutting ones (spanning more
   than one project) marked. Each task shows its status, projects, owning
   agent, what it waits on, what it blocks and the evidence for it.
+  Completed tasks stay on the board with a green ✓ until you hide them.
 - **Alerts:** what needs your attention:
   - needs that no agent owns
   - two agents changing the same thing
@@ -96,7 +97,8 @@ herdr server reload-config
 | `r` | Re-analyze all tracked agents now |
 | `g` | Jump to the agent behind the selected task or row (on an unowned task, offers to start one) |
 | `a` | Start an agent for the selected task |
-| `d` | Show or hide done and dropped tasks |
+| `x` | Hide the selected completed task (on a hidden one: unhide it) |
+| `d` | Show or hide hidden tasks |
 | `q` | Close the board |
 
 ### Starting an agent for an unowned task
@@ -172,6 +174,7 @@ herdr's plugin state directory (`~/.local/state/herdr/plugins/spook/`):
 | `tracked.json` | Tracked workspace ids |
 | `agents/<session>.json` | Per-agent summary and transcript read position |
 | `graph.json` | Concerns, tasks, alerts |
+| `hidden_tasks.json` | Completed tasks you hid with `x` |
 | `activity.jsonl` | Background call log (trimmed to 2000 lines) |
 | `queue.json`, `status.json` | Worker queue and state |
 | `briefs/<task>.md` | Briefs handed to agents started from the board |
