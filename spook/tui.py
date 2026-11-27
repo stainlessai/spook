@@ -32,7 +32,24 @@ ICON = {
     "done": ("✓", "green3"),
     "dropped": ("✗", "grey50"),
 }
+# Task sort modes, cycled with `s`. "concern" is the grouped tree; "status" groups
+# by what needs attention, most urgent first.
+SORT_MODES = ("concern", "status")
+STATUS_GROUPS = [
+    ("blocked", "Blocked", "red"),
+    ("unowned", "Unowned", "magenta"),
+    ("in_progress", "In progress", "cyan"),
+    ("waiting", "Waiting on dependencies", "yellow"),
+    ("open", "Open", "white"),
+    ("done", "Done", "green3"),
+    ("dropped", "Dropped", "grey50"),
+]
 SEV = {"critical": ("‼", "bold red"), "warn": ("!", "yellow"), "info": ("i", "blue")}
+
+
+def _task_num(tid: str) -> tuple:
+    digits = "".join(ch for ch in tid if ch.isdigit())
+    return (int(digits) if digits else 1 << 30, tid)
 
 
 def _ago(ts: float | None) -> str:
@@ -377,6 +394,7 @@ class Board(App):
         Binding("a", "assign", "Start agent"),
         Binding("c", "close_task", "Done"),
         Binding("n", "notes", "Notes"),
+        Binding("s", "cycle_sort", "Sort"),
         Binding("x", "hide_task", "Hide"),
         Binding("d", "toggle_hidden", "Show hidden"),
         Binding("t", "trash_task", "Trash"),
@@ -402,6 +420,8 @@ class Board(App):
         ]),
         ("Tasks", [
             ("↑ ↓ / enter", "Move / fold", "Move through concerns, tasks and alerts; enter folds a group."),
+            ("s", "Sort", "Cycle how tasks are grouped: by concern (the tree), or by status "
+             "(blocked, unowned, in progress, waiting on dependencies, open, done, dropped)."),
             ("g", "Jump to agent", "Focus the agent that owns the task. If it hasn't seen your latest notes, "
              "types a prompt pointing it at them (not sent; only when the agent is idle). "
              "On an unowned task, offers to start one."),
@@ -435,6 +455,10 @@ class Board(App):
         self._agents_sig = None
         self._selected_key = None
         self._rebuilding = False
+        self._concern_names: dict[str, str] = {}
+        self.sort_mode = read_json(state_dir() / "board_prefs.json", {}).get("sort", "concern")
+        if self.sort_mode not in SORT_MODES:
+            self.sort_mode = "concern"
 
     def compose(self) -> ComposeResult:
         yield Static(id="status")
@@ -584,6 +608,8 @@ class Board(App):
         n_a = len(g.get("alerts", []))
         name = missions.info()["name"]
         left = Text.assemble((name, "bold"), f" · {len(self.records)} agents · {n_t} open · {n_done} done · {n_a} alerts")
+        if self.sort_mode != "concern":
+            left.append(f" · by {self.sort_mode}")
         if not missions.members():
             left = Text.assemble((name, "bold"), " · no agents yet: press w to add some")
         running = [c for c in self.calls if c["state"] == "running"]
@@ -668,6 +694,10 @@ class Board(App):
         txt = Text.assemble((f"{icon} ", f"bold {color}"), (f"{t['id']} ", "bold"), (t["title"], title_style))
         if t.get("projects"):
             txt.append(f"  · {', '.join(t['projects'])}", style="grey62")
+        if self.sort_mode == "status":
+            c = self._concern_names.get(t.get("concern_id"))
+            if c:
+                txt.append(f"  ◆ {c}", style="grey50")
         waiting = [d for d in t.get("depends_on", []) if by_id.get(d, {}).get("status") not in ("done", "dropped")]
         if waiting:
             txt.append(f"  ← {', '.join(waiting)}", style="yellow")
@@ -706,6 +736,24 @@ class Board(App):
         concerns = {c["id"]: c for c in g.get("concerns", [])}
         departed = [t for t in tasks if t.get("departed")]
         tasks = [t for t in tasks if not t.get("departed")]
+        self._concern_names = {k: c["name"] for k, c in concerns.items()}
+        if self.sort_mode == "status":
+            self._render_by_status(tree, tasks, by_id)
+        else:
+            self._render_by_concern(tree, tasks, by_id, concerns)
+
+        if departed:
+            node = tree.root.add(Text("Agents removed from this Mission", style="grey50 italic"),
+                                 data=("concern", "_departed"), expand=True)
+            for t in departed:
+                lbl = self._task_label(t, by_id)
+                lbl.stylize("grey50")
+                node.add_leaf(lbl, data=("task", t["id"]))
+        if not tasks and not alerts and not departed:
+            tree.root.add_leaf(Text("Nothing yet. Add agents with w; analysis runs when they finish a turn.", style="italic"))
+        self.call_after_refresh(self._finish_rebuild, keep)
+
+    def _render_by_concern(self, tree, tasks, by_id, concerns) -> None:
         groups: dict[str, list] = {}
         for t in tasks:
             groups.setdefault(t.get("concern_id") if t.get("concern_id") in concerns else "_", []).append(t)
@@ -721,16 +769,41 @@ class Board(App):
             for t in sorted(items, key=lambda t: list(ICON).index(t["status"]) if t["status"] in ICON else 9):
                 node.add_leaf(self._task_label(t, by_id), data=("task", t["id"]))
 
-        if departed:
-            node = tree.root.add(Text("Agents removed from this Mission", style="grey50 italic"),
-                                 data=("concern", "_departed"), expand=True)
-            for t in departed:
-                lbl = self._task_label(t, by_id)
-                lbl.stylize("grey50")
-                node.add_leaf(lbl, data=("task", t["id"]))
-        if not tasks and not alerts and not departed:
-            tree.root.add_leaf(Text("Nothing yet. Add agents with w; analysis runs when they finish a turn.", style="italic"))
-        self.call_after_refresh(self._finish_rebuild, keep)
+    @staticmethod
+    def _status_group(t: dict, by_id: dict) -> str:
+        st = t["status"]
+        if st in ("blocked", "done", "dropped"):
+            return st
+        if not t.get("owners"):
+            return "unowned"
+        if st == "in_progress":
+            return "in_progress"
+        if any(by_id.get(d, {}).get("status") not in ("done", "dropped") for d in t.get("depends_on", [])):
+            return "waiting"
+        return "open"
+
+    def _render_by_status(self, tree, tasks, by_id) -> None:
+        groups: dict[str, list] = {}
+        for t in tasks:
+            groups.setdefault(self._status_group(t, by_id), []).append(t)
+        for gid, name, color in STATUS_GROUPS:
+            items = groups.get(gid, [])
+            if not items:
+                continue
+            label = Text.assemble((f"{name} ", f"bold {color}"), (f"({len(items)})", "grey62"))
+            node = tree.root.add(label, data=("status", gid), expand=True)
+            for t in sorted(items, key=lambda t: _task_num(t["id"])):
+                node.add_leaf(self._task_label(t, by_id), data=("task", t["id"]))
+
+    def action_cycle_sort(self) -> None:
+        if self.query_one(TabbedContent).active != "tab_tasks":
+            return
+        i = SORT_MODES.index(self.sort_mode)
+        self.sort_mode = SORT_MODES[(i + 1) % len(SORT_MODES)]
+        p = state_dir() / "board_prefs.json"
+        write_json(p, {**read_json(p, {}), "sort": self.sort_mode})
+        self.notify(f"Tasks sorted by {self.sort_mode}")
+        self._render_tree()
 
     def _finish_rebuild(self, key) -> None:
         tree = self.query_one(Tree)
@@ -795,6 +868,11 @@ class Board(App):
                 if tid in by_id:
                     lines.append(f"- **{tid}**: {by_id[tid]['title']} ({by_id[tid]['status']})")
             md.update("\n".join(lines))
+        elif kind == "status":
+            name = next((n for gid, n, _ in STATUS_GROUPS if gid == key), key)
+            ts = [t for t in g.get("tasks", []) if self._status_group(t, by_id) == key]
+            md.update(f"## {name}\n\n" + "\n".join(
+                f"- {ICON.get(t['status'], ('?',))[0]} **{t['id']}**: {t['title']}" for t in sorted(ts, key=lambda t: _task_num(t["id"]))))
         elif kind == "concern":
             c = next((c for c in g.get("concerns", []) if c["id"] == key), None)
             if c:
