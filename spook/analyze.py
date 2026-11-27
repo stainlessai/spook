@@ -140,7 +140,8 @@ ignore the rest of an agent's work. If there is no scope, include everything.
 another agent probably doesn't know about, and agents blocked on each other.
 - An agent with `launched_for_task` was started by the human specifically for that task id: \
 make it an owner of that task (keep the id) unless its record clearly shows it went elsewhere.
-- Never create a task whose subject is the board itself: closing, reopening or updating another task, \
+- Never create a task whose subject is the board itself: adding a task to it (e.g. `spook task add`), \
+closing, reopening or updating another task, \
 or telling an agent about a task's status. Apply it to the task it concerns (status, plus a note in \
 its detail such as "closed by A5; A1 notified").
 - Tasks in "Trash" were removed from the board by the human. Do not output them and do not recreate \
@@ -148,6 +149,10 @@ them under another id. Create a new task only for work that is clearly different
 - "Statuses set by the human" are decisions: keep each task at that status. If an agent's record \
 clearly shows new work on such a task after it was set (e.g. work continuing on a task the human \
 closed), do not change the status; raise a warn alert naming the task and the agent instead.
+- "Tasks added explicitly" were put on the board on purpose, by the human or an agent. Output \
+every one with its id and title unchanged. You may set its concern, owners, status and further \
+dependencies from the records, and merge other agents' matching work into it rather than \
+creating a duplicate.
 - Reuse previous task and concern ids for the same work, and never reuse a trashed task's id. \
 Only claim what the records support."""
 
@@ -224,7 +229,8 @@ def update_agent_record(previous: dict | None, meta: dict, digest: str, first_as
 
 
 def update_graph(agent_records: list[dict], previous: dict | None, trashed: list[dict],
-                 overrides: list[dict], scope: str, reserved_ids: list[str], label: str) -> dict:
+                 overrides: list[dict], scope: str, reserved_ids: list[str], label: str,
+                 added: list[dict] | None = None) -> dict:
     prompt = "\n\n".join([
         "# Mission scope",
         scope.strip() or "(none: include all of the agents' work)",
@@ -236,6 +242,8 @@ def update_graph(agent_records: list[dict], previous: dict | None, trashed: list
         json.dumps(trashed, indent=2) if trashed else "(empty)",
         "# Statuses set by the human (keep these)",
         json.dumps(overrides, indent=2) if overrides else "(none)",
+        "# Tasks added explicitly (keep every one)",
+        json.dumps(added, indent=2) if added else "(none)",
         "# Reserved task ids (in use elsewhere on this Mission; never output or reuse)",
         ", ".join(reserved_ids) if reserved_ids else "(none)",
     ])

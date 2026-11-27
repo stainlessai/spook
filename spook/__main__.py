@@ -10,6 +10,12 @@
   mission use NAME
   mission rename NAME NEW_NAME
   mission scope NAME TEXT
+  task add TITLE [--detail TEXT] [--depends T3,T4] [--concern NAME] [--mission NAME]
+                       put a task on the board. Without --mission: every Mission the
+                       calling agent's pane is on. The model keeps it (same id and title).
+  task list [--mission NAME]
+                       the Mission's tasks: id, status, owners, title, dependencies
+  install-cli          put a `spook` command in ~/.local/bin so agents can run it
   open                 dock the board on the right of the current tab (or close it)
   board                run the board UI in this terminal
   status               Missions, their agents and graph counts, worker state
@@ -23,7 +29,7 @@ import sys
 
 from . import herdr, missions
 from .paths import log, read_json, state_dir
-from .worker import FINISHED, enqueue, live_agents, rebuild_graph, run_worker
+from .worker import FINISHED, add_task, enqueue, live_agents, rebuild_graph, run_worker
 
 
 def _context() -> dict:
@@ -123,6 +129,71 @@ def cmd_mission(argv: list[str]) -> None:
         sys.exit(__doc__)
 
 
+def _caller() -> tuple[list[str], str]:
+    """(Missions the calling pane's agent is on, its alias or "the human")."""
+    pane = os.environ.get("HERDR_PANE_ID")
+    hits, alias = [], "the human"
+    for mid in missions.all_missions():
+        for sid, m in missions.members(mid).items():
+            if pane and m.get("pane_id") == pane:
+                hits.append(mid)
+                alias = read_json(state_dir() / "agents" / f"{sid}.json", {}).get("alias") or alias
+    return hits, alias
+
+
+def _target_missions(argv: list[str]) -> tuple[list[str], str]:
+    hits, alias = _caller()
+    if _opt(argv, "--mission"):
+        return [_mission_arg(argv)], alias
+    if hits:
+        return hits, alias
+    if os.environ.get("HERDR_PANE_ID"):
+        names = ", ".join(m["name"] for m in missions.all_missions().values())
+        sys.exit(f"This pane's agent isn't on a Mission. Pass --mission NAME (one of: {names}).")
+    return [missions.active()], alias
+
+
+def cmd_task(argv: list[str]) -> None:
+    sub = argv[0] if argv else ""
+    if sub == "add" and len(argv) > 1 and not argv[1].startswith("--"):
+        title = argv[1].strip()
+        if not title:
+            sys.exit("the title can't be empty")
+        deps = [x.strip().upper() for x in (_opt(argv, "--depends") or "").split(",") if x.strip()]
+        mids, alias = _target_missions(argv)
+        for mid in mids:
+            tid, unknown = add_task(mid, title, _opt(argv, "--detail") or "", deps, _opt(argv, "--concern"), alias)
+            msg = f"Added {tid} to Mission '{missions.info(mid)['name']}': {title}"
+            if unknown:
+                msg += f"  (ignored dependencies not on this board: {', '.join(unknown)})"
+            print(msg)
+            log(msg)
+    elif sub == "list":
+        mids, _ = _target_missions(argv)
+        for mid in mids:
+            g = read_json(missions.mission_dir(mid) / "graph.json", {})
+            print(f"# {missions.info(mid)['name']}")
+            for t in g.get("tasks", []):
+                deps = f"  <- {', '.join(t['depends_on'])}" if t.get("depends_on") else ""
+                print(f"{t['id']:>5}  {t['status']:<11} {','.join(t.get('owners', [])) or '-':<8} {t['title']}{deps}")
+    else:
+        sys.exit(__doc__)
+
+
+def cmd_install_cli() -> None:
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    target = os.path.expanduser("~/.local/bin/spook")
+    if os.path.exists(target) and "spook" not in open(target, errors="replace").read():
+        sys.exit(f"{target} exists and isn't spook's; not touching it")
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "w") as f:
+        f.write(f'#!/usr/bin/env bash\n# spook CLI (written by `spook install-cli`)\nexec bash "{root}/bin/spook" "$@"\n')
+    os.chmod(target, 0o755)
+    print(f"Wrote {target}")
+    if os.path.dirname(target) not in os.environ.get("PATH", "").split(":"):
+        print("~/.local/bin isn't on your PATH; add it so agents can run `spook`.")
+
+
 def cmd_status() -> None:
     print(f"state: {state_dir()}")
     act = missions.active()
@@ -144,6 +215,10 @@ def main(argv: list[str]) -> None:
         cmd_track(cmd == "track", argv[1:])
     elif cmd == "mission":
         cmd_mission(argv[1:])
+    elif cmd == "task":
+        cmd_task(argv[1:])
+    elif cmd == "install-cli":
+        cmd_install_cli()
     elif cmd == "open":
         herdr.toggle_board()
     elif cmd == "board":

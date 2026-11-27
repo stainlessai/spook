@@ -21,7 +21,7 @@ from textual.widgets import (
 from . import activity, herdr, launch, missions, notes
 from .paths import read_json, state_dir, write_json
 from .worker import (
-    delete_forever, live_agents, load_overrides, load_trash, mission_records, restore_task,
+    delete_forever, live_agents, load_added, load_overrides, load_trash, mission_records, restore_task,
     toggle_done, trash_task,
 )
 
@@ -587,11 +587,13 @@ class Board(App):
             self.records = {r["alias"]: r for r in mission_records(mid)}
             self._render_agents()
         sig = self._mtimes([d / "missions.json", md / "graph.json", md / "agents.json", md / "trash.json",
-                            md / "status_overrides.json", md / "task_notes.json", md / "hidden_tasks.json"])
+                            md / "status_overrides.json", md / "task_notes.json", md / "hidden_tasks.json",
+                            md / "added_tasks.json"])
         if sig != self._sig:
             self._sig = sig
             self.graph = read_json(md / "graph.json", {})
             self.overrides = load_overrides()
+            self.added = load_added()
             self.task_notes = notes.load()
             self.trash = load_trash()
             self._render_tree()
@@ -965,6 +967,10 @@ class Board(App):
         if ov:
             verb = "Marked done" if ov["status"] == "done" else "Reopened"
             out += ["", f"_{verb} by you {_ago(ov['at'])} (c to undo)_"]
+        added = getattr(self, "added", {}).get(t["id"])
+        if added:
+            out += ["", f"_Added by {self._owner_label(added['added_by']) if added['added_by'] != 'the human' else 'you'} "
+                        f"{_ago(added['at'])} with `spook task add`; the model keeps it._"]
         if t.get("evidence"):
             out += ["", "### Evidence", t["evidence"]]
         if t.get("owners"):

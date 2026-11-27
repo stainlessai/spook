@@ -236,6 +236,9 @@ def delete_forever(task_id: str, mission: str | None = None) -> bool:
         if trash.pop(task_id, None) is None:
             return False
         save_trash(trash, mission)
+        added = load_added(mission)
+        if added.pop(task_id, None) is not None:
+            write_json(d / "added_tasks.json", added)
     return True
 
 
@@ -267,6 +270,53 @@ def toggle_done(task_id: str, mission: str | None = None) -> str | None:
         write_json(d / "status_overrides.json", ov)
         write_json(d / "graph.json", g)
         return task["status"]
+
+
+def load_added(mission: str | None = None) -> dict[str, dict]:
+    """task id -> {"title", "detail", "depends_on", "added_by", "at"}: tasks put on the
+    board explicitly (`spook task add`). The model can't drop or rename them."""
+    return read_json(_md(mission) / "added_tasks.json", {})
+
+
+def _next_task_id(d, graph: dict) -> str:
+    used = [t["id"] for t in graph.get("tasks", [])]
+    used += list(read_json(d / "trash.json", {})) + list(read_json(d / "added_tasks.json", {}))
+    nums = [int(x[1:]) for x in used if x[:1] == "T" and x[1:].isdigit()]
+    return f"T{max(nums, default=0) + 1}"
+
+
+def add_task(mission: str, title: str, detail: str = "", depends_on: list[str] | None = None,
+             concern: str | None = None, added_by: str = "cli") -> tuple[str, list[str]]:
+    """Put a task on a Mission's board now. Returns (task id, unknown dependency ids)."""
+    d = _md(mission)
+    with file_lock(d / "graph.lock"):
+        g = read_json(d / "graph.json", {})
+        g.setdefault("tasks", [])
+        g.setdefault("concerns", [])
+        g.setdefault("alerts", [])
+        ids = {t["id"] for t in g["tasks"]}
+        deps = list(dict.fromkeys(depends_on or []))
+        unknown = [x for x in deps if x not in ids]
+        deps = [x for x in deps if x in ids]  # A typo would otherwise stick to the task for good.
+        cid = "_"
+        if concern:
+            c = next((c for c in g["concerns"] if concern.lower() in (c["id"].lower(), c["name"].lower())), None)
+            if c:
+                cid = c["id"]
+            else:
+                cid = f"C{max([int(c['id'][1:]) for c in g['concerns'] if c['id'][1:].isdigit()], default=0) + 1}"
+                g["concerns"].append({"id": cid, "name": concern, "description": "", "crosscutting": False})
+        tid = _next_task_id(d, g)
+        g["tasks"].append({
+            "id": tid, "title": title, "status": "open", "concern_id": cid, "projects": [],
+            "owners": [], "depends_on": deps, "detail": detail,
+            "evidence": f"Added by {added_by} with `spook task add`.",
+        })
+        added = load_added(mission)
+        added[tid] = {"title": title, "detail": detail, "depends_on": deps, "added_by": added_by, "at": time.time()}
+        write_json(d / "added_tasks.json", added)
+        write_json(d / "graph.json", g)
+    return tid, unknown
 
 
 def board_panes() -> set[str]:
@@ -383,12 +433,30 @@ def rebuild_graph(mission: str | None = None, force: bool = False) -> None:
         for tid, o in load_overrides(mid).items()
     ]
     reserved = sorted({t["id"] for t in departed})
+    added_in = [{"id": tid, "title": a["title"], "detail": a.get("detail", ""), "depends_on": a.get("depends_on", []),
+                 "added_by": a.get("added_by")} for tid, a in load_added(mid).items() if tid not in reserved]
+    started = time.time()
     graph = update_graph(agents_in, previous, trashed, overrides, info.get("scope", ""), reserved,
-                         f"[{info['name']}] task graph from {len(records)} agents")
+                         f"[{info['name']}] task graph from {len(records)} agents", added_in)
     graph.update(fingerprint=fp, updated_at=time.time())
     with file_lock(d / "graph.lock"):
         # The model call takes a while; apply trash/restore done meanwhile.
         trash = load_trash(mid)
+        # A task added while the model ran may share an id with one the model just made up.
+        fresh = {tid for tid, a in load_added(mid).items() if a["at"] >= started}
+        taken = {t["id"] for t in graph["tasks"]} | set(trash) | set(load_added(mid)) | set(reserved)
+        renamed = {}
+        for t in graph["tasks"]:
+            if t["id"] in fresh:
+                n = max(int(x[1:]) for x in taken if x[:1] == "T" and x[1:].isdigit()) + 1
+                renamed[t["id"]] = f"T{n}"
+                t["id"] = f"T{n}"
+                taken.add(t["id"])
+        if renamed:
+            for t in graph["tasks"]:
+                t["depends_on"] = [renamed.get(x, x) for x in t.get("depends_on", [])]
+            for a in graph.get("alerts", []):
+                a["task_ids"] = [renamed.get(x, x) for x in a.get("task_ids", [])]
         kept = []
         for t in graph["tasks"]:
             if t["id"] in trash:  # Stays off the board; keep its trash copy current.
@@ -402,6 +470,21 @@ def rebuild_graph(mission: str | None = None, force: bool = False) -> None:
                 kept.append(t)  # Restored from trash during the call.
         # Tasks of agents that left the Mission come back unchanged.
         kept += [t for t in departed if t["id"] not in trash]
+        # Explicitly added tasks always stay, with their title and dependencies.
+        cur_tasks = {t["id"]: t for t in read_json(gpath, {}).get("tasks", [])}
+        by_id = {t["id"]: t for t in kept}
+        for tid, a in load_added(mid).items():
+            if tid in trash or tid in reserved:
+                continue
+            t = by_id.get(tid)
+            if t is None:
+                t = dict(cur_tasks.get(tid) or {
+                    "id": tid, "status": "open", "concern_id": "_", "projects": [], "owners": [],
+                    "depends_on": [], "detail": a.get("detail", ""), "evidence": f"Added by {a.get('added_by')}.",
+                })
+                kept.append(t)
+            t["title"] = a["title"]
+            t["depends_on"] = list(dict.fromkeys(a.get("depends_on", []) + t.get("depends_on", [])))
         # The human's status decisions win; the model flags conflicts as alerts instead.
         ov = load_overrides(mid)
         for t in kept:

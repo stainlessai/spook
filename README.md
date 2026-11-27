@@ -195,6 +195,38 @@ Known gap: switching to an agent's tab yourself doesn't deliver notes. Use `g`.
   working on it, it may come back as a new task.
 | `q` | Close the board |
 
+### Adding tasks from an agent
+
+Agents can put a task on the board themselves, so you can just tell one
+"add a spook task for that":
+
+```sh
+spook task add "Rotate the staging keys" --depends T3 --concern billing-api --detail "after the cutover"
+spook task list                         # ids, statuses, owners, dependencies
+```
+
+- Without `--mission`, the task goes on every Mission the calling agent's pane
+  is on. Spook knows the pane from herdr's `HERDR_PANE_ID`. From a pane whose
+  agent is on no Mission, it refuses and asks for `--mission NAME`. Outside
+  herdr, it uses the active Mission.
+- The task shows up on the board right away. The model can give it owners, a
+  status, a concern and more dependencies, but it can't drop it, rename it or
+  remove the dependencies it was added with. Dependency ids that aren't on
+  the board are ignored, with a warning.
+- Trash, restore and delete forever work as for any task.
+
+`spook install-cli` writes a small `spook` command to `~/.local/bin` so agents
+can run it from any directory. To tell agents about it, add something like
+this to a `CLAUDE.md` they read:
+
+```markdown
+## Task board
+This work is tracked on a spook board. When something needs doing that isn't
+part of your current task (often in another project), add it with
+`spook task add "TITLE" [--depends T3,T4] [--concern NAME] [--detail TEXT]`
+instead of only mentioning it. `spook task list` shows the current tasks.
+```
+
 ### Starting an agent for an unowned task
 
 Press `a` on a task, or `g` on a task nobody owns. A popup shows:
@@ -233,6 +265,8 @@ bin/spook mission new "Security review" --scope "audit findings and fixes"
 bin/spook mission use "Security review"
 bin/spook track --workspace w3          # add that workspace's agents to the active Mission
 bin/spook track --pane w3:p2 --mission Default
+bin/spook task add "Update the client" --depends T4 --mission Default
+bin/spook install-cli                   # a `spook` command in ~/.local/bin
 ```
 
 ## Configuration
@@ -286,6 +320,7 @@ Per Mission, in `missions/<id>/`:
 | `agents.json` | The agents on this Mission |
 | `graph.json` | Concerns, tasks, alerts |
 | `hidden_tasks.json` | Completed tasks you hid with `x` |
+| `added_tasks.json` | Tasks added with `spook task add` (kept by the model) |
 | `trash.json` | Trashed tasks, with a snapshot of each |
 | `status_overrides.json` | Statuses you set by hand with `c` |
 | `task_notes.json` | Your private notes on tasks |

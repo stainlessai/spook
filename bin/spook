@@ -3,4 +3,6 @@
 set -euo pipefail
 root="${HERDR_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+# Let `python -m spook` find the package when run from any directory.
+export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"
 exec uv run --quiet --project "$root" python -m spook "$@"
