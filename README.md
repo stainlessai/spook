@@ -3,10 +3,10 @@
 A [herdr](https://herdr.dev) plugin for people running many coding agents at
 once on work that cuts across projects.
 
-Spook reads the Claude Code conversations of agents in the herdr workspaces
-you choose. It summarizes each agent and builds one task board across all of
-them, with concerns, tasks, dependencies and alerts. It docks on the right of
-your herdr tab.
+Spook reads the Claude Code conversations of the agents you choose and
+summarizes each one. It groups them into **Missions**, and builds a task board
+per Mission with concerns, tasks, dependencies and alerts. The board docks on
+the right of your herdr tab.
 
 It watches. It never types into an existing agent's pane, changes your repos
 or pops up notifications. The one exception is starting a new agent for an
@@ -35,13 +35,13 @@ unowned task, which happens only after you confirm it (see below).
 ```
 agent finishes a turn
   → herdr fires pane.agent_status_changed
-  → spook hook: is this workspace tracked? queue the pane
+  → spook hook: is this agent on a Mission? queue the pane
   → worker (one at a time; bursts are batched):
       1. read only the new lines of that agent's transcript
          (~/.claude/projects/<dir>/<session-id>.jsonl)
       2. digest them: user asks, agent replies, files edited, commands run
       3. claude -p  → update that agent's summary
-      4. claude -p  → rebuild the task graph from all agents' summaries
+      4. claude -p  → rebuild the task graph of each Mission the agent is on
   → the board picks up the change within a second
 ```
 
@@ -89,15 +89,18 @@ herdr server reload-config
 
 1. Press your key (or run `herdr plugin action invoke spook.open`). The board
    docks on the right of the current tab. Press it again to close it.
-2. Press `w`, tick the workspaces to watch, then press `s`. The first analysis
-   starts right away. Follow it in the status bar or the Activity tab.
-3. After that, spook updates whenever a tracked agent finishes a turn.
+2. Press `w`, tick the agents to put on the current Mission, then press `s`.
+   The first analysis starts right away. Follow it in the status bar or the
+   Activity tab.
+3. After that, spook updates whenever one of those agents finishes a turn.
+4. Press `m` to create more Missions and switch between them.
 
 | Key | Action |
 | --- | --- |
 | `?` | Open the Help tab (again to go back) |
-| `w` | Choose tracked workspaces (`space` toggles, `s` saves, `esc` cancels) |
-| `r` | Re-analyze all tracked agents now |
+| `m` | Missions: switch, create, edit (name and scope), delete |
+| `w` | Choose the agents on this Mission (`space` toggles, `s` saves, `esc` cancels) |
+| `r` | Re-analyze every agent on a Mission now |
 | `g` | Jump to the agent behind the selected task or row (on an unowned task, offers to start one) |
 | `a` | Start an agent for the selected task |
 | `c` | Mark the selected task done by hand, or reopen a done task (again to undo) |
@@ -111,10 +114,41 @@ herdr server reload-config
 All commands, with short descriptions, are in the **Help** tab (`?` opens
 it and goes back). The bottom bar points there.
 
+### Missions
+
+A Mission groups the agents working toward one goal, such as "Prod migration"
+or "Security review". It holds:
+
+- **Agents:** chosen one by one with `w`. An agent can be on several Missions.
+  It's summarized once, and each Mission uses that summary.
+- **Scope:** a short description. The Mission's task graph includes only the
+  agents' work that fits it, so an agent working on two things shows up on two
+  Missions without mixing them. With no scope, everything is included.
+- **Its own task graph and your decisions:** notes, trash, manual statuses,
+  hidden tasks and briefs. They belong to that Mission only.
+
+The board shows one Mission at a time. The status line starts with its name.
+
+- **Agents that leave a Mission:** if you remove an agent, its tasks stay on
+  the Mission under "Agents removed from this Mission", with your notes and
+  statuses still attached. They return to normal if you add the agent back.
+  Spook never empties a Mission on its own.
+- **New sessions in the same pane:** after `/clear`, or restarting Claude in a
+  pane, the new session takes the old one's place on its Missions and keeps
+  its alias.
+- **New agents aren't added automatically.** Add them with `w`. Agents you
+  start from the board with `a` join the current Mission.
+- **Deleting a Mission** (`m`, then delete) asks first. Its folder moves to
+  `missions/_deleted/` in the state directory, so it can be recovered by hand.
+
+Upgrading from 1.0: the first run moves your existing board into a Mission
+called "Default". It adds the agents from the workspaces you were tracking,
+and keeps all your data.
+
 ### Marking tasks done by hand
 
-Press `c` to mark a task done, for example when the work happened outside any
-tracked agent. On a done task, `c` reopens it. Pressing `c` again undoes your
+Press `c` to mark a task done, for example when the work happened outside the
+Mission's agents. On a done task, `c` reopens it. Pressing `c` again undoes your
 change. Tasks you set this way show "(you)".
 
 Your status decisions win. The model is told about them and keeps them. If an
@@ -155,10 +189,9 @@ Known gap: switching to an agent's tab yourself doesn't deliver notes. Use `g`.
 
 Press `a` on a task, or `g` on a task nobody owns. A popup shows:
 
-- **Directory:** guessed from the task's projects and the repos your tracked
-  agents use. You can edit it.
-- **Where:** a new tab in a tracked workspace, or a new workspace that spook
-  then tracks.
+- **Directory:** guessed from the task's projects and the repos this
+  Mission's agents use. You can edit it.
+- **Where:** a new tab in any workspace, or a new workspace.
 - **Prompt:** an editable prompt pointing the new agent at a brief file.
 
 Nothing happens until you press **Start agent**. Spook then:
@@ -173,18 +206,23 @@ Nothing happens until you press **Start agent**. Spook then:
 If Claude stops on a startup question, such as whether to trust a folder
 it hasn't seen, spook switches you to that tab. It waits up to 3 minutes for
 you to answer and only types once Claude is ready. It never types into a
-dialog. Spook records which task the agent was started for, so the graph
-makes it the task's owner after its first turn.
+dialog. The new agent joins the current Mission. Spook records which task it
+was started for, so the graph makes it the task's owner after its first turn.
 
-There are also herdr actions: **Spook: track this workspace**, **Spook: stop
-tracking this workspace** and **Spook: re-analyze now**.
+There are also herdr actions: **add this workspace's agents to the active
+Mission**, **remove this workspace's agents from the active Mission** and
+**re-analyze now**.
 
 From a shell:
 
 ```sh
-bin/spook status                     # tracked workspaces, worker state, graph counts
-bin/spook sync                       # same as r
-bin/spook track --workspace w3       # track by herdr workspace id
+bin/spook status                        # Missions, agents, graph counts, worker state
+bin/spook sync                          # same as r
+bin/spook mission list
+bin/spook mission new "Security review" --scope "audit findings and fixes"
+bin/spook mission use "Security review"
+bin/spook track --workspace w3          # add that workspace's agents to the active Mission
+bin/spook track --pane w3:p2 --mission Default
 ```
 
 ## Configuration
@@ -207,33 +245,42 @@ key in your environment instead.
 
 ## Cost and privacy
 
-- Each finished turn of a tracked agent costs two model calls of roughly
-  15–45 seconds each. The Activity tab shows API-rate cost per call. With
+- Each finished turn of an agent on a Mission costs one summary call, plus one
+  graph call per Mission it's on, of roughly 15–45 seconds each. The Activity tab shows API-rate cost per call. With
   your claude.ai login, the calls count against your plan rather than being
   billed.
-- Agent conversations from tracked workspaces are sent to Claude, the same
-  service that produced them. Untracked workspaces are never read.
+- Conversations of agents on a Mission are sent to Claude, the same service
+  that produced them. Agents on no Mission are never read.
 
 ## State
 
 The board holds no state, so closing it loses nothing. Everything lives in
 herdr's plugin state directory (`~/.local/state/herdr/plugins/spook/`):
 
+Shared:
+
 | File | What |
 | --- | --- |
-| `tracked.json` | Tracked workspace ids |
+| `missions.json` | Missions (name, scope) and which one is shown |
 | `agents/<session>.json` | Per-agent summary and transcript read position |
+| `aliases.json` | Agent ids (A1, A2…), shared by all Missions |
+| `activity.jsonl` | Background call log (trimmed to 2000 lines) |
+| `queue.json`, `status.json` | Worker queue and state |
+| `spook.log` | Debug log |
+
+Per Mission, in `missions/<id>/`:
+
+| File | What |
+| --- | --- |
+| `agents.json` | The agents on this Mission |
 | `graph.json` | Concerns, tasks, alerts |
 | `hidden_tasks.json` | Completed tasks you hid with `x` |
 | `trash.json` | Trashed tasks, with a snapshot of each |
 | `status_overrides.json` | Statuses you set by hand with `c` |
 | `task_notes.json` | Your private notes on tasks |
 | `notes_delivered.json` | Which agent pane has been pointed at which notes |
-| `activity.jsonl` | Background call log (trimmed to 2000 lines) |
-| `queue.json`, `status.json` | Worker queue and state |
-| `briefs/<task>.md` | Briefs handed to agents started from the board |
+| `briefs/<task>.md` | Briefs handed to agents |
 | `launches.json` | Which pane was started for which task |
-| `spook.log` | Debug log |
 
 A read position only advances after that agent's summary is saved. If herdr
 stops mid-analysis, the next sync redoes that chunk.
@@ -243,13 +290,13 @@ place.
 
 ## Troubleshooting
 
-- **Nothing happens.** Check that the workspace is tracked (`bin/spook
-  status`). Then check the Activity tab for failed calls, and `herdr plugin
+- **Nothing happens.** Check that the agent is on a Mission (`bin/spook
+  status`, or `w` on the board). Then check the Activity tab for failed calls, and `herdr plugin
   log list --plugin spook` for hook errors.
 - **"Credit balance is too low" in Activity.** An `ANTHROPIC_API_KEY` without
   credit is being used. Keep `strip_api_key = true`, or top up the key.
-- **An agent is missing.** Only Claude Code panes that herdr reports with a
-  session id are tracked. See `herdr agent list`.
+- **An agent is missing from the picker.** Only Claude Code panes that herdr
+  reports with a session id can be added. See `herdr agent list`.
 
 ## Layout
 
@@ -257,7 +304,8 @@ place.
 herdr-plugin.toml   manifest: startup sync, event hook, actions, board pane
 bin/spook           launcher (uv run python -m spook)
 spook/
-  __main__.py       CLI: hook, sync, track, untrack, open, board, status
+  __main__.py       CLI: hook, sync, track, untrack, mission, open, board, status
+  missions.py       Missions: registry, membership, session following, migration
   worker.py         queue, locking, per-agent updates, graph rebuild
   transcript.py     find transcripts, digest new lines
   analyze.py        prompts, JSON schemas, claude -p calls

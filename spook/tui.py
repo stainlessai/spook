@@ -18,11 +18,11 @@ from textual.widgets import (
     TabbedContent, TabPane, TextArea, Tree,
 )
 
-from . import activity, herdr, launch, notes
+from . import activity, herdr, launch, missions, notes
 from .paths import read_json, state_dir, write_json
 from .worker import (
-    delete_forever, load_overrides, load_trash, restore_task, set_tracked, toggle_done, trash_task,
-    tracked, tracked_records,
+    delete_forever, live_agents, load_overrides, load_trash, mission_records, restore_task,
+    toggle_done, trash_task,
 )
 
 ICON = {
@@ -58,42 +58,182 @@ def _trigger_sync() -> None:
     )
 
 
-class Workspaces(ModalScreen[None]):
+class AgentPicker(ModalScreen[None]):
+    """Choose which agents are on the active Mission. Agents can be on several Missions."""
+
     BINDINGS = [Binding("s", "save", "Save"), Binding("escape", "cancel", "Cancel")]
     DEFAULT_CSS = """
-    Workspaces { align: center middle; }
-    #box { width: 70; height: auto; max-height: 80%; border: round $accent; padding: 1 2; background: $panel; }
+    AgentPicker { align: center middle; }
+    #box { width: 96%; max-width: 110; height: auto; max-height: 90%; border: round $accent;
+           padding: 1 2; background: $panel; }
     SelectionList { height: auto; max-height: 30; }
     """
 
     def compose(self) -> ComposeResult:
-        t = tracked()
-        self.ws = herdr.workspaces()
-        items = [
-            (f"{w.get('label') or w['workspace_id']}  ({w['workspace_id']}, {w.get('pane_count', '?')} panes)",
-             w["workspace_id"], w["workspace_id"] in t)
-            for w in self.ws
-        ]
+        mid = missions.active()
+        mine = missions.members(mid)
+        aliases = read_json(state_dir() / "aliases.json", {})
+        ws_labels = {w["workspace_id"]: w.get("label") or w["workspace_id"] for w in herdr.workspaces()}
+        names = {m: info["name"] for m, info in missions.all_missions().items()}
+        self.agents = live_agents()
+        items = []
+        for a in self.agents:
+            sid = a["agent_session"]["value"]
+            others = [names[m] for m in missions.missions_for_session(sid) if m != mid]
+            label = f"{aliases.get(sid, '··')}  {ws_labels.get(a['workspace_id'], a['workspace_id'])} · " \
+                    f"{(a.get('terminal_title_stripped') or '')[:40]}"
+            if others:
+                label += f"  (also on: {', '.join(others)})"
+            items.append((label, sid, sid in mine))
         with Vertical(id="box"):
-            yield Label("Track which workspaces?  space: toggle · s: save · esc: cancel")
+            yield Label(f"Agents on Mission '{missions.info(mid)['name']}'   space: toggle · s: save · esc: cancel")
             yield SelectionList(*items)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
 
     def action_save(self) -> None:
+        mid = missions.active()
         chosen = set(self.query_one(SelectionList).selected)
-        t = tracked()
+        mine = set(missions.members(mid))
         changed = False
-        for w in self.ws:
-            wid, label = w["workspace_id"], w.get("label") or w["workspace_id"]
-            was = wid in t
-            if (wid in chosen) != was:
-                set_tracked(wid, label, wid in chosen)
+        for a in self.agents:
+            sid = a["agent_session"]["value"]
+            if sid in chosen and sid not in mine:
+                missions.add_agent(mid, a)
+                changed = True
+            elif sid not in chosen and sid in mine:
+                missions.remove_agent(mid, sid)
                 changed = True
         if changed:
             _trigger_sync()
         self.dismiss(None)
+
+
+class MissionForm(ModalScreen[dict | None]):
+    """Name and scope for a new or existing Mission."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    DEFAULT_CSS = """
+    MissionForm { align: center middle; }
+    #mform { width: 96%; max-width: 90; height: auto; border: round $accent; padding: 1 2; background: $panel; }
+    #mform Label { margin-top: 1; color: $text-muted; }
+    #mscope { height: 5; }
+    #mbuttons { height: auto; margin-top: 1; align-horizontal: right; }
+    #mbuttons Button { margin-left: 2; }
+    """
+
+    def __init__(self, title: str, name: str = "", scope: str = "") -> None:
+        super().__init__()
+        self.title_, self.name_, self.scope_ = title, name, scope
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="mform"):
+            yield Static(self.title_, classes="bold")
+            yield Label("Name")
+            yield Input(value=self.name_, id="mname")
+            yield Label("Scope: what belongs on this Mission. The task graph only includes agents' work that "
+                        "fits it. Leave empty to include everything.")
+            yield TextArea(self.scope_, id="mscope")
+            with Horizontal(id="mbuttons"):
+                yield Button("Cancel", id="cancel")
+                yield Button("Save", id="save", variant="primary")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "save" and self.query_one("#mname", Input).value.strip():
+            self.dismiss({"name": self.query_one("#mname", Input).value.strip(),
+                          "scope": self.query_one("#mscope", TextArea).text.strip()})
+        elif event.button.id == "cancel":
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class MissionsScreen(ModalScreen[str | None]):
+    """Switch, create, edit or delete Missions. Returns the Mission to show."""
+
+    BINDINGS = [Binding("escape", "cancel", "Close"), Binding("n", "new", "New"),
+                Binding("e", "edit", "Edit"), Binding("delete,backspace", "delete", "Delete")]
+    DEFAULT_CSS = """
+    MissionsScreen { align: center middle; }
+    #mbox { width: 96%; max-width: 90; height: auto; max-height: 90%; border: round $accent;
+            padding: 1 2; background: $panel; }
+    #mlist { height: auto; max-height: 20; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="mbox"):
+            yield Label("Missions   enter: switch · n: new · e: edit · delete: delete · esc: close")
+            yield OptionList(id="mlist")
+
+    def on_mount(self) -> None:
+        self._reload()
+
+    def _reload(self) -> None:
+        ol = self.query_one("#mlist", OptionList)
+        ol.clear_options()
+        act = missions.active()
+        self.ids = list(missions.all_missions())
+        for mid in self.ids:
+            m = missions.all_missions()[mid]
+            n = len(missions.members(mid))
+            scope = f" — {m['scope'][:50]}" if m.get("scope") else ""
+            ol.add_option(f"{'● ' if mid == act else '  '}{m['name']}  ({n} agents){scope}")
+        ol.highlighted = self.ids.index(act) if act in self.ids else 0
+        ol.focus()
+
+    def _current(self) -> str | None:
+        ol = self.query_one("#mlist", OptionList)
+        return self.ids[ol.highlighted] if ol.highlighted is not None else None
+
+    def on_option_list_option_selected(self, event) -> None:
+        mid = self._current()
+        if mid:
+            missions.set_active(mid)
+            self.dismiss(mid)
+
+    def action_new(self) -> None:
+        def made(res):
+            if res:
+                self.dismiss(missions.create(res["name"], res["scope"]))
+        self.app.push_screen(MissionForm("New Mission"), made)
+
+    def action_edit(self) -> None:
+        mid = self._current()
+        if not mid:
+            return
+        m = missions.all_missions()[mid]
+
+        def saved(res):
+            if res:
+                missions.update(mid, name=res["name"], scope=res["scope"])
+                self._reload()
+        self.app.push_screen(MissionForm(f"Edit Mission '{m['name']}'", m["name"], m.get("scope", "")), saved)
+
+    def action_delete(self) -> None:
+        mid = self._current()
+        if not mid:
+            return
+        if len(self.ids) == 1:
+            self.app.notify("Can't delete the only Mission", severity="warning")
+            return
+        name = missions.all_missions()[mid]["name"]
+
+        def done(yes: bool) -> None:
+            if yes and missions.delete(mid):
+                self.app.notify(f"Mission '{name}' deleted")
+                self._reload()
+        self.app.push_screen(Confirm(
+            f"Delete Mission '{name}'?\n\nIts task graph, notes, trash and decisions go with it. "
+            "Agents and their summaries are not affected. The folder is kept in the state "
+            "directory under missions/_deleted, so it can be recovered by hand.",
+            "Delete Mission",
+        ), done)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
 
 class LaunchAgent(ModalScreen[dict | None]):
     """Confirm, then start a Claude agent for a task with a pre-filled prompt."""
@@ -118,9 +258,9 @@ class LaunchAgent(ModalScreen[dict | None]):
         self.task_ = task
         self.brief = launch.write_brief(task, graph)
         self.dirs = launch.candidate_dirs(task)
-        t = tracked()
-        self.ws_opts = [(f"New tab in '{label}'", wid) for wid, label in t.items()]
-        self.ws_opts.append(("New workspace (spook tracks it)", self.NEW_WS))
+        self.ws_opts = [(f"New tab in '{w.get('label') or w['workspace_id']}'", w["workspace_id"])
+                        for w in herdr.workspaces()]
+        self.ws_opts.append(("New workspace", self.NEW_WS))
 
     def compose(self) -> ComposeResult:
         first = self.dirs[0][0] if self.dirs else ""
@@ -132,7 +272,8 @@ class LaunchAgent(ModalScreen[dict | None]):
                              allow_blank=False, id="dir_pick")
             yield Input(value=first, placeholder="/path/to/project", id="dir")
             yield Label("Where")
-            yield Select(self.ws_opts, value=launch.workspace_for(first) or self.NEW_WS,
+            yield Select(self.ws_opts, value=(launch.workspace_for(first) if launch.workspace_for(first) in
+                                              [w for _, w in self.ws_opts] else self.NEW_WS),
                          allow_blank=False, id="where")
             yield Label("Prompt: typed into the new agent, NOT sent. You review it and press Enter yourself.")
             yield TextArea(launch.default_prompt(self.task_, self.brief), id="prompt")
@@ -306,7 +447,8 @@ class Board(App):
         Binding("q,escape", "quit", "Close"),
         Binding("question_mark", "help", "Help"),
         Binding("r", "sync", "Re-analyze"),
-        Binding("w", "workspaces", "Workspaces"),
+        Binding("w", "agents", "Agents on Mission"),
+        Binding("m", "missions", "Missions"),
         Binding("g", "goto", "Jump to agent"),
         Binding("a", "assign", "Start agent"),
         Binding("c", "close_task", "Done"),
@@ -321,8 +463,10 @@ class Board(App):
         ("Everywhere", [
             ("?", "Help", "Open this tab; press again to go back."),
             ("q / esc", "Close", "Close the board. Analysis keeps running in the background."),
-            ("r", "Re-analyze", "Re-read every tracked agent and rebuild the task graph now."),
-            ("w", "Workspaces", "Choose which herdr workspaces spook watches."),
+            ("r", "Re-analyze", "Re-read every agent on a Mission and rebuild the task graphs now."),
+            ("m", "Missions", "Switch Missions, or create, edit (name and scope) or delete one."),
+            ("w", "Agents on Mission", "Choose which agents are on this Mission. An agent can be on "
+             "several Missions."),
         ]),
         ("Tasks", [
             ("↑ ↓ / enter", "Move / fold", "Move through concerns, tasks and alerts; enter folds a group."),
@@ -460,17 +604,24 @@ class Board(App):
 
     def poll(self) -> None:
         d = state_dir()
+        mid = missions.active()
+        if mid != getattr(self, "_mission", None):  # Switched Missions: start fresh.
+            self._mission = mid
+            self._sig = self._agents_sig = None
+            self._selected_key = None
+            self.show_hidden = False
+        md = missions.mission_dir(mid)
         # Agent files change constantly during analysis; only redraw the tree when the graph does.
-        agents_sig = self._mtimes([d / "tracked.json", *sorted((d / "agents").glob("*.json"))])
+        agents_sig = self._mtimes([md / "agents.json", *sorted((d / "agents").glob("*.json"))])
         if agents_sig != self._agents_sig:
             self._agents_sig = agents_sig
-            self.records = {r["alias"]: r for r in tracked_records()}
+            self.records = {r["alias"]: r for r in mission_records(mid)}
             self._render_agents()
-        sig = self._mtimes([d / "graph.json", d / "tracked.json", d / "trash.json",
-                            d / "status_overrides.json", d / "task_notes.json"])
+        sig = self._mtimes([d / "missions.json", md / "graph.json", md / "agents.json", md / "trash.json",
+                            md / "status_overrides.json", md / "task_notes.json", md / "hidden_tasks.json"])
         if sig != self._sig:
             self._sig = sig
-            self.graph = read_json(d / "graph.json", {})
+            self.graph = read_json(md / "graph.json", {})
             self.overrides = load_overrides()
             self.task_notes = notes.load()
             self.trash = load_trash()
@@ -486,9 +637,10 @@ class Board(App):
         n_t = len([x for x in g.get("tasks", []) if x["status"] not in ("done", "dropped")])
         n_done = len([x for x in g.get("tasks", []) if x["status"] == "done"])
         n_a = len(g.get("alerts", []))
-        left = f"{len(tracked())} workspaces · {len(self.records)} agents · {n_t} open · {n_done} done · {n_a} alerts"
-        if not tracked():
-            left = "No workspaces tracked yet — press w to pick some"
+        name = missions.info()["name"]
+        left = Text.assemble((name, "bold"), f" · {len(self.records)} agents · {n_t} open · {n_done} done · {n_a} alerts")
+        if not missions.members():
+            left = Text.assemble((name, "bold"), " · no agents yet: press w to add some")
         running = [c for c in self.calls if c["state"] == "running"]
         queued = read_json(state_dir() / "queue.json", [])
         if running:
@@ -607,6 +759,8 @@ class Board(App):
                 an.add_leaf(Text.assemble((f"{icon} ", style), a["text"]), data=("alert", i))
 
         concerns = {c["id"]: c for c in g.get("concerns", [])}
+        departed = [t for t in tasks if t.get("departed")]
+        tasks = [t for t in tasks if not t.get("departed")]
         groups: dict[str, list] = {}
         for t in tasks:
             groups.setdefault(t.get("concern_id") if t.get("concern_id") in concerns else "_", []).append(t)
@@ -622,8 +776,15 @@ class Board(App):
             for t in sorted(items, key=lambda t: list(ICON).index(t["status"]) if t["status"] in ICON else 9):
                 node.add_leaf(self._task_label(t, by_id), data=("task", t["id"]))
 
-        if not tasks and not alerts:
-            tree.root.add_leaf(Text("Nothing yet. Track workspaces with w; analysis runs when agents finish a turn.", style="italic"))
+        if departed:
+            node = tree.root.add(Text("Agents removed from this Mission", style="grey50 italic"),
+                                 data=("concern", "_departed"), expand=True)
+            for t in departed:
+                lbl = self._task_label(t, by_id)
+                lbl.stylize("grey50")
+                node.add_leaf(lbl, data=("task", t["id"]))
+        if not tasks and not alerts and not departed:
+            tree.root.add_leaf(Text("Nothing yet. Add agents with w; analysis runs when they finish a turn.", style="italic"))
         self.call_after_refresh(self._finish_rebuild, keep)
 
     def _finish_rebuild(self, key) -> None:
@@ -783,8 +944,15 @@ class Board(App):
         _trigger_sync()
         self.notify("Re-analysis started")
 
-    def action_workspaces(self) -> None:
-        self.push_screen(Workspaces(), lambda _: self.poll())
+    def action_agents(self) -> None:
+        self.push_screen(AgentPicker(), lambda _: self.poll())
+
+    def action_missions(self) -> None:
+        def chosen(mid):
+            self.poll()
+            if mid:
+                self.notify(f"Mission: {missions.info(mid)['name']}")
+        self.push_screen(MissionsScreen(), chosen)
 
     def action_close_task(self) -> None:
         if self.query_one(TabbedContent).active != "tab_tasks":
@@ -859,7 +1027,7 @@ class Board(App):
 
     @property
     def hidden(self) -> set[str]:
-        return set(read_json(state_dir() / "hidden_tasks.json", []))
+        return set(read_json(missions.mission_dir() / "hidden_tasks.json", []))
 
     def action_hide_task(self) -> None:
         key = self._current_key()
@@ -880,7 +1048,7 @@ class Board(App):
         # Move off the row first so the cursor lands on a neighbour, not the top.
         if not self.show_hidden and task["id"] in hidden:
             self.query_one(Tree).action_cursor_down()
-        write_json(state_dir() / "hidden_tasks.json", sorted(hidden))
+        write_json(missions.mission_dir() / "hidden_tasks.json", sorted(hidden))
         self._render_tree()
 
     def action_toggle_hidden(self) -> None:
@@ -897,8 +1065,13 @@ class Board(App):
             t = self._selected_task()
             alias = t["owners"][0] if t and t.get("owners") else None
         r = self.records.get(alias) if alias else None
+        task = self._selected_task()
+        if task and task.get("departed"):
+            self.notify(f"{task['id']}'s agent isn't on this Mission anymore. Add it back with w, "
+                        "or press a to start a new agent.", severity="warning")
+            return
         if not r:
-            if self._selected_task():
+            if task:
                 self.action_assign()  # Unowned task: offer to start one.
             else:
                 self.notify("Select a task or an alert to jump to its agent", severity="warning")

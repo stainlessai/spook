@@ -10,31 +10,32 @@ from __future__ import annotations
 import time
 import uuid
 
-from .paths import file_lock, read_json, state_dir, write_json
+from . import missions
+from .paths import file_lock, read_json, write_json
 
 
-def _path():
-    return state_dir() / "task_notes.json"
+def _path(mission: str | None = None):
+    return missions.mission_dir(mission) / "task_notes.json"
 
 
-def load() -> dict[str, list[dict]]:
+def load(mission: str | None = None) -> dict[str, list[dict]]:
     """task id -> [{"id", "text", "at"}], oldest first."""
-    return read_json(_path(), {})
+    return read_json(_path(mission), {})
 
 
-def for_task(task_id: str) -> list[dict]:
-    return load().get(task_id, [])
+def for_task(task_id: str, mission: str | None = None) -> list[dict]:
+    return load(mission).get(task_id, [])
 
 
 def add(task_id: str, text: str) -> None:
-    with file_lock(state_dir() / "notes.lock"):
+    with file_lock(missions.mission_dir() / "notes.lock"):
         notes = load()
         notes.setdefault(task_id, []).append({"id": uuid.uuid4().hex[:8], "text": text.strip(), "at": time.time()})
         write_json(_path(), notes)
 
 
 def delete(task_id: str, note_id: str) -> None:
-    with file_lock(state_dir() / "notes.lock"):
+    with file_lock(missions.mission_dir() / "notes.lock"):
         notes = load()
         notes[task_id] = [n for n in notes.get(task_id, []) if n["id"] != note_id]
         if not notes[task_id]:
@@ -45,7 +46,7 @@ def delete(task_id: str, note_id: str) -> None:
 # ---------------------------------------------------------------- delivery to agents
 
 def _delivered_path():
-    return state_dir() / "notes_delivered.json"
+    return missions.mission_dir() / "notes_delivered.json"
 
 
 def undelivered(pane_id: str, task_ids: list[str]) -> dict[str, int]:
@@ -60,7 +61,7 @@ def undelivered(pane_id: str, task_ids: list[str]) -> dict[str, int]:
 
 
 def mark_delivered(pane_id: str, task_ids: list[str]) -> None:
-    with file_lock(state_dir() / "notes.lock"):
+    with file_lock(missions.mission_dir() / "notes.lock"):
         d = read_json(_delivered_path(), {})
         for tid in task_ids:
             latest = max((n["at"] for n in for_task(tid)), default=0)

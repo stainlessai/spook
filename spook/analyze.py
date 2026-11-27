@@ -127,7 +127,10 @@ is met. Record it as a status change and a note on the item it concerns."""
 GRAPH_SYSTEM = """You are the coordinator for a human running several coding agents at once, \
 each in its own directory, on problems with crosscutting concerns.
 
-You get each agent's status record and the previous task graph. Produce the updated graph:
+You get the Mission's scope, each agent's status record and the previous task graph. \
+Produce the updated graph:
+- Agents can work on several things. Include only work relevant to the Mission scope and \
+ignore the rest of an agent's work. If there is no scope, include everything.
 - Merge work items from different agents that are the same underlying work into one task.
 - Group tasks into concerns. A concern is crosscutting when it spans more than one project.
 - Add `depends_on` edges when one task cannot finish until another does, including when one agent's \
@@ -221,8 +224,10 @@ def update_agent_record(previous: dict | None, meta: dict, digest: str, first_as
 
 
 def update_graph(agent_records: list[dict], previous: dict | None, trashed: list[dict],
-                 overrides: list[dict]) -> dict:
+                 overrides: list[dict], scope: str, reserved_ids: list[str], label: str) -> dict:
     prompt = "\n\n".join([
+        "# Mission scope",
+        scope.strip() or "(none: include all of the agents' work)",
         "# Agents",
         json.dumps(agent_records, indent=2),
         "# Previous graph",
@@ -231,8 +236,7 @@ def update_graph(agent_records: list[dict], previous: dict | None, trashed: list
         json.dumps(trashed, indent=2) if trashed else "(empty)",
         "# Statuses set by the human (keep these)",
         json.dumps(overrides, indent=2) if overrides else "(none)",
+        "# Reserved task ids (in use elsewhere on this Mission; never output or reuse)",
+        ", ".join(reserved_ids) if reserved_ids else "(none)",
     ])
-    return claude_json(
-        GRAPH_SYSTEM, prompt, GRAPH_SCHEMA, load_config()["graph_model"],
-        f"task graph from {len(agent_records)} agents",
-    )
+    return claude_json(GRAPH_SYSTEM, prompt, GRAPH_SCHEMA, load_config()["graph_model"], label)

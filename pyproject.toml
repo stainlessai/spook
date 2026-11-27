@@ -1,6 +1,6 @@
 [project]
 name = "spook"
-version = "1.0.0"
+version = "1.1.0"
 description = "Herdr plugin: cross-project task board built from agent conversations"
 requires-python = ">=3.11"
 license = "Apache-2.0"

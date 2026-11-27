@@ -12,9 +12,9 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import herdr, notes
+from . import herdr, missions, notes
 from .paths import read_json, state_dir, write_json
-from .worker import set_tracked, tracked, tracked_records
+from .worker import mission_records
 
 
 # ---------------------------------------------------------------- where to run it
@@ -31,7 +31,7 @@ def _toplevel(path: str) -> str | None:
 def candidate_dirs(task: dict) -> list[tuple[str, str]]:
     """(directory, why) pairs, best guess first, from the task's projects and known agents."""
     roots: dict[str, str] = {}  # repo root -> workspace label
-    for r in tracked_records():
+    for r in mission_records():
         top = _toplevel(r["cwd"]) if r.get("cwd") else None
         if top:
             roots.setdefault(top, r["workspace"])
@@ -62,9 +62,9 @@ def candidate_dirs(task: dict) -> list[tuple[str, str]]:
 
 
 def workspace_for(directory: str) -> str | None:
-    """A tracked workspace whose agents work in the same repo, if any."""
+    """A workspace of an agent on the active Mission that works in the same repo, if any."""
     top = _toplevel(directory) or directory
-    for r in tracked_records():
+    for r in mission_records():
         if r.get("cwd") and (_toplevel(r["cwd"]) or r["cwd"]) == top:
             return r["workspace_id"]
     return None
@@ -75,7 +75,7 @@ def workspace_for(directory: str) -> str | None:
 def write_brief(task: dict, graph: dict) -> Path:
     by_id = {t["id"]: t for t in graph.get("tasks", [])}
     concern = next((c for c in graph.get("concerns", []) if c["id"] == task.get("concern_id")), None)
-    records = {r["alias"]: r for r in tracked_records()}
+    records = {r["alias"]: r for r in mission_records()}
     blocks = [t for t in by_id.values() if task["id"] in t.get("depends_on", [])]
     alerts = [a for a in graph.get("alerts", []) if task["id"] in a.get("task_ids", [])]
     projects = set(task.get("projects", []))
@@ -135,7 +135,7 @@ def write_brief(task: dict, graph: dict) -> Path:
                 lines += [f"  - needs: {n}" for n in w.get("needs", [])]
                 lines += [f"  - provides: {p}" for p in w.get("provides", [])]
 
-    path = state_dir() / "briefs" / f"{task['id']}.md"
+    path = missions.mission_dir() / "briefs" / f"{task['id']}.md"
     path.parent.mkdir(exist_ok=True)
     path.write_text("\n".join(lines) + "\n")
     return path
@@ -172,8 +172,6 @@ def launch(task: dict, directory: str, workspace_id: str | None, prompt: str, pr
         ws = res["workspace"]
         workspace_id = ws["workspace_id"]
         tab_id = ws.get("active_tab_id") or f"{workspace_id}:t1"
-        # Follow the new agent.
-        set_tracked(workspace_id, ws.get("label") or label, True)
     pane = _first_pane(tab_id)
 
     progress("Starting Claude (waiting until it's ready)…")
@@ -195,12 +193,19 @@ def launch(task: dict, directory: str, workspace_id: str | None, prompt: str, pr
     status = herdr.call("agent", "get", pane).get("agent", {}).get("agent_status")
     if status != "idle":
         raise herdr.HerdrError(f"Claude isn't ready in {pane} (status: {status}); nothing was typed. "
-                               f"The brief is at {state_dir() / 'briefs' / (task['id'] + '.md')}")
+                               f"The brief is at {missions.mission_dir() / 'briefs' / (task['id'] + '.md')}")
 
     # Record before typing so the graph links the agent to the task even if typing fails.
-    launches = read_json(state_dir() / "launches.json", {})
+    mdir = missions.mission_dir()
+    launches = read_json(mdir / "launches.json", {})
     launches[pane] = {"task_id": task["id"], "ts": time.time(), "dir": directory}
-    write_json(state_dir() / "launches.json", launches)
+    write_json(mdir / "launches.json", launches)
+    # Put the new agent on the active Mission (by session if herdr knows it yet).
+    agent = herdr.call("agent", "get", pane).get("agent", {})
+    if (agent.get("agent_session") or {}).get("value"):
+        missions.add_agent(missions.active(), agent)
+    else:
+        missions.add_pending_pane(missions.active(), pane)
 
     progress("Typing the prompt (not sending it)…")
     one_line = re.sub(r"\s*\n\s*", " ", prompt).strip()
