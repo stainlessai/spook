@@ -25,16 +25,21 @@ from .worker import (
     toggle_done, trash_task,
 )
 
+# Keyed by status, plus the two derived groups (unowned, waiting): on the board a
+# task shows the icon of the status group it falls in (Board._status_group).
 ICON = {
-    "open": ("○", "white"),
-    "in_progress": ("◐", "cyan"),
     "blocked": ("■", "red"),
+    "unowned": ("◌", "magenta"),
+    "in_progress": ("◐", "cyan"),
+    "waiting": ("⧗", "yellow"),
+    "open": ("○", "white"),
     "done": ("✓", "green3"),
     "dropped": ("✗", "grey50"),
 }
 # Task sort modes, cycled with `s`. "concern" is the grouped tree; "status" groups
-# by what needs attention, most urgent first.
-SORT_MODES = ("concern", "status")
+# by what needs attention, most urgent first; "dependencies" nests each task's
+# dependencies under it.
+SORT_MODES = ("concern", "status", "dependencies")
 STATUS_GROUPS = [
     ("blocked", "Blocked", "red"),
     ("unowned", "Unowned", "magenta"),
@@ -420,8 +425,9 @@ class Board(App):
         ]),
         ("Tasks", [
             ("↑ ↓ / enter", "Move / fold", "Move through concerns, tasks and alerts; enter folds a group."),
-            ("s", "Sort", "Cycle how tasks are grouped: by concern (the tree), or by status "
-             "(blocked, unowned, in progress, waiting on dependencies, open, done, dropped)."),
+            ("s", "Sort", "Cycle how tasks are grouped: by concern; by status (blocked, unowned, "
+             "in progress, waiting on dependencies, open, done, dropped); or as a dependency tree, "
+             "each task with the tasks it depends on beneath it."),
             ("g", "Jump to agent", "Focus the agent that owns the task. If it hasn't seen your latest notes, "
              "types a prompt pointing it at them (not sent; only when the agent is idle). "
              "On an unowned task, offers to start one."),
@@ -686,7 +692,7 @@ class Board(App):
         return f"{alias} ({r['workspace']})" if r else alias
 
     def _task_label(self, t: dict, by_id: dict) -> Text:
-        icon, color = ICON.get(t["status"], ("?", "white"))
+        icon, color = self._icon(t, by_id)
         finished = t["status"] in ("done", "dropped")
         title_style = "grey62" if finished else ""
         if t["id"] in self.hidden:
@@ -694,7 +700,7 @@ class Board(App):
         txt = Text.assemble((f"{icon} ", f"bold {color}"), (f"{t['id']} ", "bold"), (t["title"], title_style))
         if t.get("projects"):
             txt.append(f"  · {', '.join(t['projects'])}", style="grey62")
-        if self.sort_mode == "status":
+        if self.sort_mode != "concern":
             c = self._concern_names.get(t.get("concern_id"))
             if c:
                 txt.append(f"  ◆ {c}", style="grey50")
@@ -739,6 +745,8 @@ class Board(App):
         self._concern_names = {k: c["name"] for k, c in concerns.items()}
         if self.sort_mode == "status":
             self._render_by_status(tree, tasks, by_id)
+        elif self.sort_mode == "dependencies":
+            self._render_by_dependencies(tree, tasks, by_id)
         else:
             self._render_by_concern(tree, tasks, by_id, concerns)
 
@@ -766,8 +774,11 @@ class Board(App):
             if c.get("crosscutting"):
                 label.append("  crosscutting", style="cyan italic")
             node = tree.root.add(label, data=("concern", c["id"]), expand=True)
-            for t in sorted(items, key=lambda t: list(ICON).index(t["status"]) if t["status"] in ICON else 9):
+            for t in sorted(items, key=lambda t: (list(ICON).index(self._status_group(t, by_id)), _task_num(t["id"]))):
                 node.add_leaf(self._task_label(t, by_id), data=("task", t["id"]))
+
+    def _icon(self, t: dict, by_id: dict) -> tuple[str, str]:
+        return ICON.get(self._status_group(t, by_id), ("?", "white"))
 
     @staticmethod
     def _status_group(t: dict, by_id: dict) -> str:
@@ -794,6 +805,49 @@ class Board(App):
             node = tree.root.add(label, data=("status", gid), expand=True)
             for t in sorted(items, key=lambda t: _task_num(t["id"])):
                 node.add_leaf(self._task_label(t, by_id), data=("task", t["id"]))
+
+    def _render_by_dependencies(self, tree, tasks, by_id) -> None:
+        """Each task with the tasks it depends on nested beneath it (like a package
+        dependency tree). Roots are tasks nothing on the board depends on. A task
+        needed by several others is expanded once; later mentions point back to it."""
+        visible = {t["id"]: t for t in tasks}
+        deps = {tid: [d for d in t.get("depends_on", []) if d in visible and d != tid] for tid, t in visible.items()}
+        needed = {d for ds in deps.values() for d in ds}
+        order = lambda tid: (list(ICON).index(self._status_group(visible[tid], by_id)), _task_num(tid))
+        shown: set[str] = set()
+
+        def add(parent, tid, path):
+            t = visible[tid]
+            label = self._task_label(t, by_id)
+            if tid in path:
+                label.append("  ↺ cycle", style="red")
+                parent.add_leaf(label, data=("task", tid))
+                return
+            if tid in shown and deps[tid]:
+                label.append("  ↑ expanded above", style="grey50 italic")
+                parent.add_leaf(label, data=("task", tid))
+                return
+            shown.add(tid)
+            if not deps[tid]:
+                parent.add_leaf(label, data=("task", tid))
+                return
+            node = parent.add(label, data=("task", tid), expand=True)
+            for d in sorted(deps[tid], key=order):
+                add(node, d, path | {tid})
+
+        roots = [tid for tid in visible if deps[tid] and tid not in needed]
+        for tid in sorted(roots, key=order):
+            add(tree.root, tid, set())
+        # Tasks only reachable through a cycle have no root; start from them directly.
+        for tid in sorted(visible, key=order):
+            if deps[tid] and tid not in shown:
+                add(tree.root, tid, set())
+        alone = [tid for tid in visible if not deps[tid] and tid not in needed]
+        if alone:
+            node = tree.root.add(Text.assemble(("No dependencies ", "bold grey62"), (f"({len(alone)})", "grey62")),
+                                 data=("deps", "alone"), expand=True)
+            for tid in sorted(alone, key=order):
+                node.add_leaf(self._task_label(visible[tid], by_id), data=("task", tid))
 
     def action_cycle_sort(self) -> None:
         if self.query_one(TabbedContent).active != "tab_tasks":
@@ -868,11 +922,14 @@ class Board(App):
                 if tid in by_id:
                     lines.append(f"- **{tid}**: {by_id[tid]['title']} ({by_id[tid]['status']})")
             md.update("\n".join(lines))
+        elif kind == "deps":
+            md.update("## No dependencies\n\nTasks that neither depend on another task on the board "
+                      "nor are depended on.")
         elif kind == "status":
             name = next((n for gid, n, _ in STATUS_GROUPS if gid == key), key)
             ts = [t for t in g.get("tasks", []) if self._status_group(t, by_id) == key]
             md.update(f"## {name}\n\n" + "\n".join(
-                f"- {ICON.get(t['status'], ('?',))[0]} **{t['id']}**: {t['title']}" for t in sorted(ts, key=lambda t: _task_num(t["id"]))))
+                f"- {self._icon(t, by_id)[0]} **{t['id']}**: {t['title']}" for t in sorted(ts, key=lambda t: _task_num(t["id"]))))
         elif kind == "concern":
             c = next((c for c in g.get("concerns", []) if c["id"] == key), None)
             if c:
@@ -880,7 +937,7 @@ class Board(App):
                 projects = sorted({p for t in ts for p in t.get("projects", [])})
                 md.update(
                     f"## {c['name']}\n\n{c['description']}\n\n**Projects**: {', '.join(projects) or '—'}\n\n"
-                    + "\n".join(f"- {ICON.get(t['status'], ('?',))[0]} **{t['id']}**: {t['title']}" for t in ts)
+                    + "\n".join(f"- {self._icon(t, by_id)[0]} **{t['id']}**: {t['title']}" for t in ts)
                 )
         else:
             md.update("")

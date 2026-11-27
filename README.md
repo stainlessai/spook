@@ -110,7 +110,7 @@ herdr server reload-config
 | `a` | Start an agent for the selected task |
 | `c` | Mark the selected task done by hand, or reopen a done task (again to undo) |
 | `n` | Add or delete private notes on the selected task |
-| `s` | Cycle the task sort: by concern (the tree) or by status (blocked, unowned, in progress, waiting on dependencies, open, done, dropped) |
+| `s` | Cycle the task sort: by concern; by status (blocked, unowned, in progress, waiting on dependencies, open, done, dropped); or as a dependency tree (each task with the tasks it depends on beneath it) |
 | `x` | Hide the selected completed task (on a hidden one: unhide it) |
 | `d` | Show or hide hidden tasks |
 | `t` | Move the selected task to the Trash tab |
