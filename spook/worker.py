@@ -273,6 +273,35 @@ def delete_forever(task_id: str) -> bool:
     return True
 
 
+def load_overrides() -> dict[str, dict]:
+    """task id -> {"status", "prev", "at"}: statuses the human set by hand."""
+    return read_json(state_dir() / "status_overrides.json", {})
+
+
+def toggle_done(task_id: str) -> str | None:
+    """Mark a task done by hand, or reopen it. Returns the new status."""
+    with file_lock(state_dir() / "graph.lock"):
+        g = read_json(state_dir() / "graph.json", {})
+        task = next((t for t in g.get("tasks", []) if t["id"] == task_id), None)
+        if not task:
+            return None
+        ov = load_overrides()
+        if task["status"] in ("done", "dropped"):
+            mine = ov.get(task_id)
+            if mine and mine["status"] == "done":
+                ov.pop(task_id)  # Undo my own close: back to what it was.
+                task["status"] = mine.get("prev") or "open"
+            else:
+                ov[task_id] = {"status": "open", "prev": task["status"], "at": time.time()}
+                task["status"] = "open"
+        else:
+            ov[task_id] = {"status": "done", "prev": task["status"], "at": time.time()}
+            task["status"] = "done"
+        write_json(state_dir() / "status_overrides.json", ov)
+        write_json(state_dir() / "graph.json", g)
+        return task["status"]
+
+
 def board_panes() -> set[str]:
     return set(read_json(state_dir() / "board_panes.json", {}))
 
@@ -341,7 +370,11 @@ def rebuild_graph(force: bool = False) -> None:
     previous = {k: prev[k] for k in ("concerns", "tasks", "alerts") if k in prev} or None
     trashed = [{"id": tid, "title": e["task"]["title"], "status": e["task"]["status"]}
                for tid, e in load_trash().items()]
-    graph = update_graph(agents_in, previous, trashed)
+    overrides = [
+        {"id": tid, "status": o["status"], "set_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(o["at"]))}
+        for tid, o in load_overrides().items()
+    ]
+    graph = update_graph(agents_in, previous, trashed, overrides)
     graph.update(fingerprint=fp, updated_at=time.time())
     with file_lock(state_dir() / "graph.lock"):
         # The model call takes a while; apply trash/restore done meanwhile.
@@ -357,6 +390,11 @@ def rebuild_graph(force: bool = False) -> None:
         for t in read_json(gpath, {}).get("tasks", []):
             if t["id"] not in prev_ids and t["id"] not in out_ids and t["id"] not in trash:
                 kept.append(t)  # Restored from trash during the call.
+        # The human's status decisions win; the model flags conflicts as alerts instead.
+        ov = load_overrides()
+        for t in kept:
+            if t["id"] in ov:
+                t["status"] = ov[t["id"]]["status"]
         graph["tasks"] = kept
         save_trash(trash)
         write_json(gpath, graph)

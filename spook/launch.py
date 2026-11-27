@@ -12,7 +12,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import herdr
+from . import herdr, notes
 from .paths import read_json, state_dir, write_json
 from .worker import set_tracked, tracked, tracked_records
 
@@ -91,6 +91,13 @@ def write_brief(task: dict, graph: dict) -> Path:
         f"- **Concern:** {concern['name'] + ' — ' + concern['description'] if concern else '—'}",
         f"- **Snapshot taken:** {time.strftime('%Y-%m-%d %H:%M')}",
         "",
+    ]
+    mine = notes.for_task(task["id"])
+    if mine:
+        lines += ["## Notes from the human (follow these)"]
+        lines += [f"- ({time.strftime('%Y-%m-%d %H:%M', time.localtime(n['at']))}) {n['text']}" for n in mine]
+        lines += [""]
+    lines += [
         "## What needs doing",
         task.get("detail", ""),
         "",
@@ -198,4 +205,28 @@ def launch(task: dict, directory: str, workspace_id: str | None, prompt: str, pr
     progress("Typing the prompt (not sending it)…")
     one_line = re.sub(r"\s*\n\s*", " ", prompt).strip()
     herdr.call("pane", "send-text", pane, one_line)
+    notes.mark_delivered(pane, [task["id"]])  # The brief it was pointed at has them.
     return {"pane_id": pane, "workspace_id": workspace_id, "tab_id": tab_id}
+
+
+def deliver_notes(pane_id: str, tasks: list[dict], graph: dict) -> str:
+    """Point an existing agent at refreshed briefs that hold notes it hasn't seen.
+
+    Types a prompt into its input box without sending it, and only when the agent
+    is idle, so nothing lands in a running turn or a dialog. Returns what happened.
+    """
+    pending = notes.undelivered(pane_id, [t["id"] for t in tasks])
+    if not pending:
+        return "none"
+    status = herdr.call("agent", "get", pane_id).get("agent", {}).get("agent_status")
+    if status not in ("idle", "done"):
+        return f"busy:{status}"
+    briefs = [str(write_brief(t, graph)) for t in tasks if t["id"] in pending]
+    what = ", ".join(f"{tid} ({n} new note{'s' * (n > 1)})" for tid, n in pending.items())
+    prompt = (
+        f"I've added notes on {what} in spook. Read the 'Notes from the human' section of "
+        f"{' and '.join(briefs)} and take them into account."
+    )
+    herdr.call("pane", "send-text", pane_id, prompt)
+    notes.mark_delivered(pane_id, list(pending))
+    return "typed"

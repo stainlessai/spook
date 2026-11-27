@@ -95,17 +95,47 @@ herdr server reload-config
 
 | Key | Action |
 | --- | --- |
+| `?` | Open the Help tab (again to go back) |
 | `w` | Choose tracked workspaces (`space` toggles, `s` saves, `esc` cancels) |
 | `r` | Re-analyze all tracked agents now |
 | `g` | Jump to the agent behind the selected task or row (on an unowned task, offers to start one) |
 | `a` | Start an agent for the selected task |
+| `c` | Mark the selected task done by hand, or reopen a done task (again to undo) |
+| `n` | Add or delete private notes on the selected task |
 | `x` | Hide the selected completed task (on a hidden one: unhide it) |
 | `d` | Show or hide hidden tasks |
 | `t` | Move the selected task to the Trash tab |
 | `u` | Trash tab: restore the selected task to the board |
 | `X` | Trash tab: delete the selected task permanently (asks first) |
 
-The key guide at the bottom shows only the keys for the current tab.
+All commands, with short descriptions, are in the **Help** tab (`?` opens
+it and goes back). The bottom bar points there.
+
+### Marking tasks done by hand
+
+Press `c` to mark a task done, for example when the work happened outside any
+tracked agent. On a done task, `c` reopens it. Pressing `c` again undoes your
+change. Tasks you set this way show "(you)".
+
+Your status decisions win. The model is told about them and keeps them. If an
+agent later works on a task you closed, the model raises an alert and leaves
+the status alone. Only you change it back.
+
+### Notes for agents
+
+Press `n` on a task to add private notes, e.g. "use the staging bucket, not
+prod". Notes are never sent to spook's analysis models. They reach agents
+working on the task:
+
+- **Starting an agent with `a`:** the brief includes a "Notes from the human"
+  section.
+- **Jumping to an agent with `g`:** if the agent owns tasks with notes it
+  hasn't been pointed at yet, spook refreshes those briefs. It types a one-line
+  prompt into the agent's input box asking it to read them, without sending
+  it. It only types when the agent is idle. If the agent is busy, it says so
+  and types nothing.
+
+Known gap: switching to an agent's tab yourself doesn't deliver notes. Use `g`.
 
 ### Hiding, trash and delete
 
@@ -196,6 +226,9 @@ herdr's plugin state directory (`~/.local/state/herdr/plugins/spook/`):
 | `graph.json` | Concerns, tasks, alerts |
 | `hidden_tasks.json` | Completed tasks you hid with `x` |
 | `trash.json` | Trashed tasks, with a snapshot of each |
+| `status_overrides.json` | Statuses you set by hand with `c` |
+| `task_notes.json` | Your private notes on tasks |
+| `notes_delivered.json` | Which agent pane has been pointed at which notes |
 | `activity.jsonl` | Background call log (trimmed to 2000 lines) |
 | `queue.json`, `status.json` | Worker queue and state |
 | `briefs/<task>.md` | Briefs handed to agents started from the board |
@@ -229,7 +262,8 @@ spook/
   transcript.py     find transcripts, digest new lines
   analyze.py        prompts, JSON schemas, claude -p calls
   activity.py       background call log
-  launch.py         start an agent for a task: directory guess, brief, prompt
+  launch.py         start an agent for a task; briefs; deliver notes on g
+  notes.py          private task notes and their delivery to agents
   herdr.py          herdr CLI/socket helpers, docking
   tui.py            the Textual board
 ```

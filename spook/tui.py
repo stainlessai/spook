@@ -14,14 +14,15 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual import work
 from textual.widgets import (
-    Button, DataTable, Input, Label, Markdown, Select, SelectionList, Static, TabbedContent,
-    TabPane, TextArea, Tree,
+    Button, DataTable, Input, Label, Markdown, OptionList, Select, SelectionList, Static,
+    TabbedContent, TabPane, TextArea, Tree,
 )
 
-from . import activity, herdr, launch
+from . import activity, herdr, launch, notes
 from .paths import read_json, state_dir, write_json
 from .worker import (
-    delete_forever, load_trash, restore_task, set_tracked, trash_task, tracked, tracked_records,
+    delete_forever, load_overrides, load_trash, restore_task, set_tracked, toggle_done, trash_task,
+    tracked, tracked_records,
 )
 
 ICON = {
@@ -175,6 +176,77 @@ class LaunchAgent(ModalScreen[dict | None]):
         self.app.call_from_thread(self.dismiss, result)
 
 
+class NotesEditor(ModalScreen[None]):
+    """Private notes on one task. Agents see them via briefs; the models never do."""
+
+    BINDINGS = [Binding("escape", "close", "Close"), Binding("delete,backspace", "delete_note", "Delete note")]
+    DEFAULT_CSS = """
+    NotesEditor { align: center middle; }
+    #notes_box { width: 96%; max-width: 100; height: auto; max-height: 96%; border: round $accent;
+                 padding: 1 2; background: $panel; }
+    #notes_box Label { margin-top: 1; color: $text-muted; }
+    #notes_title { text-style: bold; }
+    #note_list { height: auto; max-height: 12; }
+    #note_text { height: 5; }
+    #notes_buttons { height: auto; margin-top: 1; align-horizontal: right; }
+    #notes_buttons Button { margin-left: 2; }
+    """
+
+    def __init__(self, task: dict) -> None:
+        super().__init__()
+        self.task_ = task
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="notes_box"):
+            yield Static(f"Notes on {self.task_['id']}: {self.task_['title']}", id="notes_title")
+            yield Static("Private: never sent to spook's models. Agents get them through the task brief "
+                         "(when started with a, or when g finds notes they haven't seen).", classes="muted")
+            yield Label("Notes (select one and press delete to remove it)")
+            yield OptionList(id="note_list")
+            yield Label("New note")
+            yield TextArea(id="note_text")
+            with Horizontal(id="notes_buttons"):
+                yield Button("Close", id="close")
+                yield Button("Add note", id="add", variant="primary")
+
+    def on_mount(self) -> None:
+        self._reload()
+        self.query_one("#note_text", TextArea).focus()
+
+    def _reload(self) -> None:
+        ol = self.query_one("#note_list", OptionList)
+        ol.clear_options()
+        self.items = notes.for_task(self.task_["id"])
+        if not self.items:
+            ol.add_option("(none yet)")
+            ol.disabled = True
+            return
+        ol.disabled = False
+        for n in self.items:
+            ol.add_option(f"{time.strftime('%m-%d %H:%M', time.localtime(n['at']))}  {n['text']}")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "close":
+            self.dismiss(None)
+            return
+        box = self.query_one("#note_text", TextArea)
+        if box.text.strip():
+            notes.add(self.task_["id"], box.text)
+            box.clear()
+            self._reload()
+            self.app.notify(f"Note added to {self.task_['id']}")
+
+    def action_delete_note(self) -> None:
+        ol = self.query_one("#note_list", OptionList)
+        if self.focused is not ol or ol.highlighted is None or not self.items:
+            return
+        notes.delete(self.task_["id"], self.items[ol.highlighted]["id"])
+        self._reload()
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class Confirm(ModalScreen[bool]):
     BINDINGS = [Binding("escape", "no", "Cancel")]
     DEFAULT_CSS = """
@@ -210,7 +282,10 @@ class Board(App):
     AUTO_FOCUS = "#tree"
     CSS = """
     #status { height: auto; padding: 0 1; background: $boost; }
-    #keys { dock: bottom; height: 2; padding: 0 1; background: $boost; }
+    #keys { dock: bottom; height: 1; padding: 0 1; background: $boost; color: $text-muted; }
+    #help_box { padding: 0 1; }
+    /* Pin the Help tab to the right end of the tab bar. */
+    #--content-tab-tab_help { dock: right; }
     #tree, #agents { width: 50%; }
     #act_head { height: auto; padding: 0 1; color: $text-muted; border-bottom: solid $primary-darken-2; }
     #calls, #trash { width: 50%; }
@@ -229,24 +304,51 @@ class Board(App):
     NARROW_COLS = 110
     BINDINGS = [
         Binding("q,escape", "quit", "Close"),
+        Binding("question_mark", "help", "Help"),
         Binding("r", "sync", "Re-analyze"),
         Binding("w", "workspaces", "Workspaces"),
-        Binding("g", "goto", "Go to agent"),
+        Binding("g", "goto", "Jump to agent"),
         Binding("a", "assign", "Start agent"),
-        Binding("x", "hide_task", "Hide done"),
+        Binding("c", "close_task", "Done"),
+        Binding("n", "notes", "Notes"),
+        Binding("x", "hide_task", "Hide"),
         Binding("d", "toggle_hidden", "Show hidden"),
         Binding("t", "trash_task", "Trash"),
         Binding("u", "restore_task", "Restore"),
         Binding("X", "delete_forever", "Delete forever"),
     ]
-    # Which keys each tab shows in the guide (the rest are global).
-    TAB_KEYS = {
-        "tab_tasks": ["g", "a", "x", "d", "t"],
-        "tab_agents": ["g"],
-        "tab_activity": [],
-        "tab_trash": ["u", "X"],
-    }
-    GLOBAL_KEYS = ["q", "r", "w"]
+    HELP = [
+        ("Everywhere", [
+            ("?", "Help", "Open this tab; press again to go back."),
+            ("q / esc", "Close", "Close the board. Analysis keeps running in the background."),
+            ("r", "Re-analyze", "Re-read every tracked agent and rebuild the task graph now."),
+            ("w", "Workspaces", "Choose which herdr workspaces spook watches."),
+        ]),
+        ("Tasks", [
+            ("↑ ↓ / enter", "Move / fold", "Move through concerns, tasks and alerts; enter folds a group."),
+            ("g", "Jump to agent", "Focus the agent that owns the task. If it hasn't seen your latest notes, "
+             "types a prompt pointing it at them (not sent; only when the agent is idle). "
+             "On an unowned task, offers to start one."),
+            ("a", "Start agent", "Start a new Claude agent for the task. Confirm first; the prompt is typed, not sent."),
+            ("c", "Done / reopen", "Mark the task done by hand, or reopen a done task. Again to undo. Your call wins over the model."),
+            ("n", "Notes", "Add or delete private notes on the task, for agents working on it. "
+             "Never sent to spook's models."),
+            ("x", "Hide", "Hide a completed task from the board (display only)."),
+            ("d", "Show hidden", "Show or hide the tasks you hid."),
+            ("t", "Trash", "Move any task to the Trash tab. The model is told not to recreate it."),
+        ]),
+        ("Agents", [
+            ("g", "Jump to agent", "Focus the selected agent's pane, pointing it at notes it hasn't seen "
+             "on tasks it owns (typed, not sent)."),
+        ]),
+        ("Activity", [
+            ("↑ ↓", "Inspect", "Select a background analysis call to see its timing, size, cost and errors."),
+        ]),
+        ("Trash", [
+            ("u", "Restore", "Put the task back on the board."),
+            ("X", "Delete forever", "Remove it from the trash (asks first). The model is no longer told about it."),
+        ]),
+    ]
 
     def __init__(self) -> None:
         super().__init__()
@@ -283,7 +385,10 @@ class Board(App):
                     yield DataTable(id="trash", cursor_type="row")
                     with VerticalScroll(id="trash_box"):
                         yield Markdown(id="trash_detail")
-        yield Static(id="keys")
+            with TabPane("Help", id="tab_help"):
+                with VerticalScroll(id="help_box"):
+                    yield Markdown(self._help_md(), id="help")
+        yield Static(Text.assemble("Commands are in the ", ("Help", "bold"), " tab · press ", ("?", "bold orange1")), id="keys")
 
     def on_mount(self) -> None:
         tree = self.query_one(Tree)
@@ -295,7 +400,6 @@ class Board(App):
         self.trash: dict = {}
         self.calls: list[dict] = []
         self.screen.set_class(self.size.width < self.NARROW_COLS, "narrow")
-        self._render_keys(self.size.width)
         self._register_pane(True)
         self.poll()
         self.set_interval(1, self.poll)
@@ -319,40 +423,34 @@ class Board(App):
             panes.pop(pane, None)
         write_json(p, panes)
 
-    def on_tabbed_content_tab_activated(self, event) -> None:
-        self._render_keys(self.size.width)
-
     def on_resize(self, event) -> None:
         self.screen.set_class(event.size.width < self.NARROW_COLS, "narrow")
-        self._render_keys(event.size.width)
 
-    def _render_keys(self, width: int) -> None:
-        """Key guide packed into two rows, breaking only between keys."""
-        items = []
-        try:
-            tab = self.query_one(TabbedContent).active
-        except Exception:
-            tab = "tab_tasks"
-        wanted = self.GLOBAL_KEYS + self.TAB_KEYS.get(tab, [])
-        for b in sorted(self.BINDINGS, key=lambda b: wanted.index(b.key.split(",")[0]) if b.key.split(",")[0] in wanted else 99):
-            key = b.key.split(",")[0]
-            if key not in wanted:
-                continue
-            label = "Hide hidden" if (b.action == "toggle_hidden" and self.show_hidden) else b.description
-            item = Text(f"{key} {label}")
-            item.stylize("bold orange1", 0, len(key))
-            items.append(item)
-        avail = max(20, width - 2)
-        rows: list[Text] = [Text()]
-        for it in items:
-            sep = 3 if rows[-1].plain else 0
-            if rows[-1].plain and len(rows[-1].plain) + sep + len(it.plain) > avail and len(rows) < 2:
-                rows.append(Text())
-                sep = 0
-            if sep:
-                rows[-1].append("   ")
-            rows[-1].append_text(it)
-        self.query_one("#keys", Static).update(Text("\n").join(rows))
+    def _help_md(self) -> str:
+        out = []
+        for section, rows in self.HELP:
+            out.append(f"## {section}")
+            out += [f"- **`{key}`**: {name} — {desc}" for key, name, desc in rows]
+            out.append("")
+        return "\n".join(out)
+
+    FOCUS_IN_TAB = {"tab_tasks": "#tree", "tab_agents": "#agents", "tab_activity": "#calls",
+                    "tab_trash": "#trash", "tab_help": "#help_box"}
+
+    def _switch_tab(self, tab: str) -> None:
+        # Move focus into the new tab first: if focus stays on a widget in the old tab,
+        # Textual follows it and switches straight back.
+        self.set_focus(None)
+        self.query_one(TabbedContent).active = tab
+        self.query_one(self.FOCUS_IN_TAB[tab]).focus()
+
+    def action_help(self) -> None:
+        tc = self.query_one(TabbedContent)
+        if tc.active == "tab_help":
+            self._switch_tab(getattr(self, "_before_help", "tab_tasks"))
+        else:
+            self._before_help = tc.active
+            self._switch_tab("tab_help")
 
     # ---------------------------------------------------------------- data
 
@@ -368,17 +466,16 @@ class Board(App):
             self._agents_sig = agents_sig
             self.records = {r["alias"]: r for r in tracked_records()}
             self._render_agents()
-        sig = self._mtimes([d / "graph.json", d / "tracked.json", d / "trash.json"])
+        sig = self._mtimes([d / "graph.json", d / "tracked.json", d / "trash.json",
+                            d / "status_overrides.json", d / "task_notes.json"])
         if sig != self._sig:
             self._sig = sig
             self.graph = read_json(d / "graph.json", {})
+            self.overrides = load_overrides()
+            self.task_notes = notes.load()
             self.trash = load_trash()
             self._render_tree()
             self._render_trash()
-        tab = self.query_one(TabbedContent).active
-        if tab != getattr(self, "_keys_tab", None):
-            self._keys_tab = tab
-            self._render_keys(self.size.width)
         status = read_json(state_dir() / "status.json", {})
         self.calls, self.syncs = activity.load()
         self._render_status(status)
@@ -481,6 +578,11 @@ class Board(App):
             txt.append("  unowned", style="magenta")
         if t["id"] in self.hidden:
             txt.append("  hidden", style="grey42")
+        if t["id"] in getattr(self, "overrides", {}):
+            txt.append("  (you)", style="grey50 italic")
+        n = len(getattr(self, "task_notes", {}).get(t["id"], []))
+        if n:
+            txt.append(f"  ✎{n}", style="khaki1")
         return txt
 
     def _render_tree(self) -> None:
@@ -614,6 +716,14 @@ class Board(App):
             out += [f"- **{d}**: {by_id[d]['title']} ({by_id[d]['status']})" if d in by_id else f"- {d}" for d in t["depends_on"]]
         if blocks:
             out += ["", "### Blocks"] + [f"- **{b['id']}**: {b['title']} ({b['status']})" for b in blocks]
+        mine = getattr(self, "task_notes", {}).get(t["id"], [])
+        if mine:
+            out += ["", "### Your notes (private)"]
+            out += [f"- {time.strftime('%m-%d %H:%M', time.localtime(n['at']))}: {n['text']}" for n in mine]
+        ov = getattr(self, "overrides", {}).get(t["id"])
+        if ov:
+            verb = "Marked done" if ov["status"] == "done" else "Reopened"
+            out += ["", f"_{verb} by you {_ago(ov['at'])} (c to undo)_"]
         if t.get("evidence"):
             out += ["", "### Evidence", t["evidence"]]
         if t.get("owners"):
@@ -675,6 +785,18 @@ class Board(App):
 
     def action_workspaces(self) -> None:
         self.push_screen(Workspaces(), lambda _: self.poll())
+
+    def action_close_task(self) -> None:
+        if self.query_one(TabbedContent).active != "tab_tasks":
+            return
+        key = self._current_key()
+        if not key or key[0] != "task":
+            self.notify("Select a task first", severity="warning")
+            return
+        new = toggle_done(key[1])
+        if new:
+            self.notify(f"{key[1]} marked done" if new == "done" else f"{key[1]} reopened ({new})")
+            self.poll()
 
     def _render_trash(self) -> None:
         table = self.query_one("#trash", DataTable)
@@ -763,7 +885,6 @@ class Board(App):
 
     def action_toggle_hidden(self) -> None:
         self.show_hidden = not self.show_hidden
-        self._render_keys(self.size.width)
         self._render_tree()
 
     def action_goto(self) -> None:
@@ -782,9 +903,30 @@ class Board(App):
             else:
                 self.notify("Select a task or an alert to jump to its agent", severity="warning")
             return
+        owned = [t for t in self.graph.get("tasks", []) if alias in t.get("owners", [])]
+        try:
+            result = launch.deliver_notes(r["pane_id"], owned, self.graph)
+        except Exception as e:
+            result = f"error:{e}"
+        if result == "typed":
+            self.notify(f"Typed a prompt into {alias} pointing at your new notes. Review it and press Enter.")
+        elif result.startswith("busy:"):
+            self.notify(f"{alias} has notes it hasn't seen but is {result[5:]}; nothing typed. Press g again when it's idle.",
+                        severity="warning")
+        elif result.startswith("error:"):
+            self.notify(f"Couldn't deliver notes: {result[6:]}", severity="error")
         herdr.focus_pane(r["pane_id"])
         if not os.environ.get("HERDR_PANE_ID"):  # Popup: get out of the way. Docked: stay.
             self.exit()
+
+    def action_notes(self) -> None:
+        if self.query_one(TabbedContent).active != "tab_tasks":
+            return
+        task = self._selected_task()
+        if not task:
+            self.notify("Select a task first", severity="warning")
+            return
+        self.push_screen(NotesEditor(task), lambda _: self.poll())
 
     def _selected_task(self) -> dict | None:
         """The task under the cursor, or the first task of a selected alert."""

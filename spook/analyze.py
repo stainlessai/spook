@@ -142,6 +142,9 @@ or telling an agent about a task's status. Apply it to the task it concerns (sta
 its detail such as "closed by A5; A1 notified").
 - Tasks in "Trash" were removed from the board by the human. Do not output them and do not recreate \
 them under another id. Create a new task only for work that is clearly different from them.
+- "Statuses set by the human" are decisions: keep each task at that status. If an agent's record \
+clearly shows new work on such a task after it was set (e.g. work continuing on a task the human \
+closed), do not change the status; raise a warn alert naming the task and the agent instead.
 - Reuse previous task and concern ids for the same work, and never reuse a trashed task's id. \
 Only claim what the records support."""
 
@@ -217,7 +220,8 @@ def update_agent_record(previous: dict | None, meta: dict, digest: str, first_as
     return claude_json(AGENT_SYSTEM, "\n\n".join(parts), AGENT_SCHEMA, load_config()["agent_model"], label)
 
 
-def update_graph(agent_records: list[dict], previous: dict | None, trashed: list[dict]) -> dict:
+def update_graph(agent_records: list[dict], previous: dict | None, trashed: list[dict],
+                 overrides: list[dict]) -> dict:
     prompt = "\n\n".join([
         "# Agents",
         json.dumps(agent_records, indent=2),
@@ -225,6 +229,8 @@ def update_graph(agent_records: list[dict], previous: dict | None, trashed: list
         json.dumps(previous, indent=2) if previous else "(none)",
         "# Trash (removed from the board by the human; do not recreate)",
         json.dumps(trashed, indent=2) if trashed else "(empty)",
+        "# Statuses set by the human (keep these)",
+        json.dumps(overrides, indent=2) if overrides else "(none)",
     ])
     return claude_json(
         GRAPH_SYSTEM, prompt, GRAPH_SCHEMA, load_config()["graph_model"],
