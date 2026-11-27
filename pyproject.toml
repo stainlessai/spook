@@ -1,0 +1,9 @@
+[project]
+name = "spook"
+version = "0.1.0"
+description = "Herdr plugin: cross-project task board built from agent conversations"
+requires-python = ">=3.11"
+dependencies = ["textual>=1.0"]
+
+[tool.uv]
+package = false

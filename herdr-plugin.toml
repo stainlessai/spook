@@ -1,0 +1,43 @@
+id = "spook"
+name = "Spook"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Watches agent conversations in tracked workspaces and builds a cross-project task and dependency board."
+platforms = ["linux", "macos"]
+
+# Catch up on anything that changed while herdr was down.
+[[startup]]
+command = ["bash", "bin/spook", "sync"]
+
+# Every time an agent changes state; spook ignores everything but finished turns.
+[[events]]
+on = "pane.agent_status_changed"
+command = ["bash", "bin/spook", "hook"]
+
+[[actions]]
+id = "open"
+title = "Spook: toggle task board"
+command = ["bash", "bin/spook", "open"]
+
+[[actions]]
+id = "track"
+title = "Spook: track this workspace"
+contexts = ["workspace"]
+command = ["bash", "bin/spook", "track"]
+
+[[actions]]
+id = "untrack"
+title = "Spook: stop tracking this workspace"
+contexts = ["workspace"]
+command = ["bash", "bin/spook", "untrack"]
+
+[[actions]]
+id = "sync"
+title = "Spook: re-analyze now"
+command = ["bash", "bin/spook", "sync"]
+
+[[panes]]
+id = "board"
+title = "Spook"
+placement = "split"
+command = ["bash", "bin/spook", "board"]

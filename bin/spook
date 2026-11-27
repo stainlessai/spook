@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Entry point for herdr and for manual use. Runs the Python package through uv.
+set -euo pipefail
+root="${HERDR_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+exec uv run --quiet --project "$root" python -m spook "$@"
