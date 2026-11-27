@@ -1,6 +1,6 @@
 id = "spook"
 name = "Spook"
-version = "0.1.0"
+version = "1.0.0"
 min_herdr_version = "0.9.0"
 description = "Watches agent conversations in tracked workspaces and builds a cross-project task and dependency board."
 platforms = ["linux", "macos"]
