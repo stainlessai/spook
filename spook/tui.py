@@ -1264,13 +1264,16 @@ class Board(App):
 
     def action_goto(self) -> None:
         alias = None
-        if self.query_one(TabbedContent).active == "tab_agents":
+        on_agents = self.query_one(TabbedContent).active == "tab_agents"
+        if on_agents:
             table = self.query_one("#agents", DataTable)
             if table.row_count:
                 alias = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
         else:
             t = self._selected_task()
-            alias = t["owners"][0] if t and t.get("owners") else None
+            owners = t.get("owners", []) if t else []
+            # Prefer an owner whose pane is still open.
+            alias = next((o for o in owners if not self.records.get(o, {}).get("gone")), owners[0] if owners else None)
         r = self.records.get(alias) if alias else None
         task = self._selected_task()
         if task and task.get("departed"):
@@ -1282,6 +1285,15 @@ class Board(App):
                 self.action_assign()  # Unowned task: offer to start one.
             else:
                 self.notify("Select a task or an alert to jump to its agent", severity="warning")
+            return
+        if r.get("gone"):
+            # The owner's pane has closed: nothing to deliver to or focus.
+            if task and not on_agents:
+                self.notify(f"{alias}'s pane is closed. Start a new agent for {task['id']}? "
+                            "Its brief will include your notes.", severity="warning")
+                self.action_assign()
+            else:
+                self.notify(f"{alias}'s pane is closed.", severity="warning")
             return
         owned = [t for t in self.graph.get("tasks", []) if alias in t.get("owners", [])]
         try:
