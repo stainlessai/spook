@@ -102,6 +102,7 @@ herdr server reload-config
 | `a` | Start an agent for the selected task |
 | `c` | Mark the selected task done by hand, or reopen a done task (again to undo) |
 | `n` | Add or delete private notes on the selected task |
+| `s` | Cycle the task sort: by concern (the tree) or by status (blocked, unowned, in progress, waiting on dependencies, open, done, dropped) |
 | `x` | Hide the selected completed task (on a hidden one: unhide it) |
 | `d` | Show or hide hidden tasks |
 | `t` | Move the selected task to the Trash tab |
@@ -225,6 +226,7 @@ herdr's plugin state directory (`~/.local/state/herdr/plugins/spook/`):
 | `agents/<session>.json` | Per-agent summary and transcript read position |
 | `graph.json` | Concerns, tasks, alerts |
 | `hidden_tasks.json` | Completed tasks you hid with `x` |
+| `board_prefs.json` | Board display preferences (the task sort) |
 | `trash.json` | Trashed tasks, with a snapshot of each |
 | `status_overrides.json` | Statuses you set by hand with `c` |
 | `task_notes.json` | Your private notes on tasks |
