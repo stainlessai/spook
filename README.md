@@ -27,6 +27,8 @@ unowned task, which happens only after you confirm it (see below).
   from other projects, what it provides to them, and open questions.
 - **Activity:** every background analysis call, live, with timing, cost,
   errors and the queue.
+- **Trash:** tasks you took off the board. Restore them, or delete them for
+  good.
 
 ## How it works
 
@@ -99,6 +101,24 @@ herdr server reload-config
 | `a` | Start an agent for the selected task |
 | `x` | Hide the selected completed task (on a hidden one: unhide it) |
 | `d` | Show or hide hidden tasks |
+| `t` | Move the selected task to the Trash tab |
+| `u` | Trash tab: restore the selected task to the board |
+| `X` | Trash tab: delete the selected task permanently (asks first) |
+
+The key guide at the bottom shows only the keys for the current tab.
+
+### Hiding, trash and delete
+
+- **Hide** (`x`) is for completed tasks you don't need to see. It's a display
+  setting only. The model is unaffected, and a hidden task reappears if it
+  reopens.
+- **Trash** (`t`) takes any task off the board without losing it. The model is
+  told what's in the trash and asked not to recreate those tasks. If it outputs
+  one anyway, spook keeps it in the trash and updates the trash copy. Restore
+  it with `u`.
+- **Delete forever** (`X`) works only in the Trash tab. It removes the task
+  from the trash, so the model is no longer told about it. If agents keep
+  working on it, it may come back as a new task.
 | `q` | Close the board |
 
 ### Starting an agent for an unowned task
@@ -175,6 +195,7 @@ herdr's plugin state directory (`~/.local/state/herdr/plugins/spook/`):
 | `agents/<session>.json` | Per-agent summary and transcript read position |
 | `graph.json` | Concerns, tasks, alerts |
 | `hidden_tasks.json` | Completed tasks you hid with `x` |
+| `trash.json` | Trashed tasks, with a snapshot of each |
 | `activity.jsonl` | Background call log (trimmed to 2000 lines) |
 | `queue.json`, `status.json` | Worker queue and state |
 | `briefs/<task>.md` | Briefs handed to agents started from the board |
@@ -212,3 +233,7 @@ spook/
   herdr.py          herdr CLI/socket helpers, docking
   tui.py            the Textual board
 ```
+
+## License
+
+[Apache License 2.0](LICENSE)

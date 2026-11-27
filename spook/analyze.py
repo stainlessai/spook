@@ -119,7 +119,10 @@ Return the updated record. Rules:
 that something elsewhere may depend on or be broken by (APIs, schemas, IAM, configs, env vars, contracts). \
 These two fields drive cross-project dependency tracking, so be specific and concrete.
 - Only record what the conversation supports. Do not invent work.
-- Drop items that are fully irrelevant now; keep finished ones as done."""
+- Drop items that are fully irrelevant now; keep finished ones as done.
+- Acting on the spook task board itself is not a work item: closing or reopening a spook task \
+(ids like T3), reporting a task's status, or telling another agent that a task is done or a dependency \
+is met. Record it as a status change and a note on the item it concerns."""
 
 GRAPH_SYSTEM = """You are the coordinator for a human running several coding agents at once, \
 each in its own directory, on problems with crosscutting concerns.
@@ -134,7 +137,13 @@ You get each agent's status record and the previous task graph. Produce the upda
 another agent probably doesn't know about, and agents blocked on each other.
 - An agent with `launched_for_task` was started by the human specifically for that task id: \
 make it an owner of that task (keep the id) unless its record clearly shows it went elsewhere.
-- Reuse previous task and concern ids for the same work. Only claim what the records support."""
+- Never create a task whose subject is the board itself: closing, reopening or updating another task, \
+or telling an agent about a task's status. Apply it to the task it concerns (status, plus a note in \
+its detail such as "closed by A5; A1 notified").
+- Tasks in "Trash" were removed from the board by the human. Do not output them and do not recreate \
+them under another id. Create a new task only for work that is clearly different from them.
+- Reuse previous task and concern ids for the same work, and never reuse a trashed task's id. \
+Only claim what the records support."""
 
 
 def _env() -> dict:
@@ -208,12 +217,14 @@ def update_agent_record(previous: dict | None, meta: dict, digest: str, first_as
     return claude_json(AGENT_SYSTEM, "\n\n".join(parts), AGENT_SCHEMA, load_config()["agent_model"], label)
 
 
-def update_graph(agent_records: list[dict], previous: dict | None) -> dict:
+def update_graph(agent_records: list[dict], previous: dict | None, trashed: list[dict]) -> dict:
     prompt = "\n\n".join([
         "# Agents",
         json.dumps(agent_records, indent=2),
         "# Previous graph",
         json.dumps(previous, indent=2) if previous else "(none)",
+        "# Trash (removed from the board by the human; do not recreate)",
+        json.dumps(trashed, indent=2) if trashed else "(empty)",
     ])
     return claude_json(
         GRAPH_SYSTEM, prompt, GRAPH_SCHEMA, load_config()["graph_model"],

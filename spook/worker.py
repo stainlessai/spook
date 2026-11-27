@@ -228,6 +228,51 @@ def tracked_records() -> list[dict]:
 
 # ---------------------------------------------------------------- main step
 
+def load_trash() -> dict[str, dict]:
+    """task id -> {"task": snapshot, "trashed_at": ts}"""
+    return read_json(state_dir() / "trash.json", {})
+
+
+def save_trash(trash: dict[str, dict]) -> None:
+    write_json(state_dir() / "trash.json", trash)
+
+
+def trash_task(task_id: str) -> bool:
+    with file_lock(state_dir() / "graph.lock"):
+        g = read_json(state_dir() / "graph.json", {})
+        task = next((t for t in g.get("tasks", []) if t["id"] == task_id), None)
+        if not task:
+            return False
+        trash = load_trash()
+        trash[task_id] = {"task": task, "trashed_at": time.time()}
+        save_trash(trash)
+        g["tasks"] = [t for t in g["tasks"] if t["id"] != task_id]
+        write_json(state_dir() / "graph.json", g)
+    return True
+
+
+def restore_task(task_id: str) -> bool:
+    with file_lock(state_dir() / "graph.lock"):
+        trash = load_trash()
+        entry = trash.pop(task_id, None)
+        if not entry:
+            return False
+        g = read_json(state_dir() / "graph.json", {})
+        g.setdefault("tasks", []).append(entry["task"])
+        write_json(state_dir() / "graph.json", g)
+        save_trash(trash)
+    return True
+
+
+def delete_forever(task_id: str) -> bool:
+    with file_lock(state_dir() / "graph.lock"):
+        trash = load_trash()
+        if trash.pop(task_id, None) is None:
+            return False
+        save_trash(trash)
+    return True
+
+
 def board_panes() -> set[str]:
     return set(read_json(state_dir() / "board_panes.json", {}))
 
@@ -294,8 +339,26 @@ def rebuild_graph(force: bool = False) -> None:
         for r in records
     ]
     previous = {k: prev[k] for k in ("concerns", "tasks", "alerts") if k in prev} or None
-    graph = update_graph(agents_in, previous)
+    trashed = [{"id": tid, "title": e["task"]["title"], "status": e["task"]["status"]}
+               for tid, e in load_trash().items()]
+    graph = update_graph(agents_in, previous, trashed)
     graph.update(fingerprint=fp, updated_at=time.time())
-    write_json(gpath, graph)
+    with file_lock(state_dir() / "graph.lock"):
+        # The model call takes a while; apply trash/restore done meanwhile.
+        trash = load_trash()
+        kept = []
+        for t in graph["tasks"]:
+            if t["id"] in trash:  # Stays off the board; keep its trash copy current.
+                trash[t["id"]]["task"] = t
+            else:
+                kept.append(t)
+        out_ids = {t["id"] for t in kept}
+        prev_ids = {t["id"] for t in prev.get("tasks", [])}
+        for t in read_json(gpath, {}).get("tasks", []):
+            if t["id"] not in prev_ids and t["id"] not in out_ids and t["id"] not in trash:
+                kept.append(t)  # Restored from trash during the call.
+        graph["tasks"] = kept
+        save_trash(trash)
+        write_json(gpath, graph)
 
     log(f"graph: {len(graph['tasks'])} tasks, {len(graph['concerns'])} concerns, {len(graph['alerts'])} alerts")

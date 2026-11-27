@@ -20,7 +20,9 @@ from textual.widgets import (
 
 from . import activity, herdr, launch
 from .paths import read_json, state_dir, write_json
-from .worker import set_tracked, tracked, tracked_records
+from .worker import (
+    delete_forever, load_trash, restore_task, set_tracked, trash_task, tracked, tracked_records,
+)
 
 ICON = {
     "open": ("○", "white"),
@@ -173,14 +175,48 @@ class LaunchAgent(ModalScreen[dict | None]):
         self.app.call_from_thread(self.dismiss, result)
 
 
+class Confirm(ModalScreen[bool]):
+    BINDINGS = [Binding("escape", "no", "Cancel")]
+    DEFAULT_CSS = """
+    Confirm { align: center middle; }
+    #confirm { width: 60; max-width: 96%; height: auto; border: round $error; padding: 1 2; background: $panel; }
+    #confirm_buttons { height: auto; margin-top: 1; align-horizontal: right; }
+    #confirm_buttons Button { margin-left: 2; }
+    """
+
+    def __init__(self, message: str, yes: str) -> None:
+        super().__init__()
+        self.message, self.yes = message, yes
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm"):
+            yield Static(self.message)
+            with Horizontal(id="confirm_buttons"):
+                yield Button("Cancel", id="no")
+                yield Button(self.yes, id="yes", variant="error")
+
+    def on_mount(self) -> None:
+        self.query_one("#no", Button).focus()  # Safe default.
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "yes")
+
+    def action_no(self) -> None:
+        self.dismiss(False)
+
+
 class Board(App):
     TITLE = "spook"
+    AUTO_FOCUS = "#tree"
     CSS = """
     #status { height: auto; padding: 0 1; background: $boost; }
     #keys { dock: bottom; height: 2; padding: 0 1; background: $boost; }
     #tree, #agents { width: 50%; }
     #act_head { height: auto; padding: 0 1; color: $text-muted; border-bottom: solid $primary-darken-2; }
-    #calls { width: 50%; }
+    #calls, #trash { width: 50%; }
+    #trash_box { width: 50%; border-left: solid $primary-darken-2; padding: 0 1; }
+    .narrow #trash { width: 100%; height: 55%; }
+    .narrow #trash_box { width: 100%; height: 45%; border-left: none; border-top: solid $primary-darken-2; }
     #call_box { width: 50%; border-left: solid $primary-darken-2; padding: 0 1; }
     .narrow #calls { width: 100%; height: 60%; }
     .narrow #call_box { width: 100%; height: 40%; border-left: none; border-top: solid $primary-darken-2; }
@@ -197,9 +233,20 @@ class Board(App):
         Binding("w", "workspaces", "Workspaces"),
         Binding("g", "goto", "Go to agent"),
         Binding("a", "assign", "Start agent"),
-        Binding("x", "hide_task", "Hide done task"),
+        Binding("x", "hide_task", "Hide done"),
         Binding("d", "toggle_hidden", "Show hidden"),
+        Binding("t", "trash_task", "Trash"),
+        Binding("u", "restore_task", "Restore"),
+        Binding("X", "delete_forever", "Delete forever"),
     ]
+    # Which keys each tab shows in the guide (the rest are global).
+    TAB_KEYS = {
+        "tab_tasks": ["g", "a", "x", "d", "t"],
+        "tab_agents": ["g"],
+        "tab_activity": [],
+        "tab_trash": ["u", "X"],
+    }
+    GLOBAL_KEYS = ["q", "r", "w"]
 
     def __init__(self) -> None:
         super().__init__()
@@ -231,6 +278,11 @@ class Board(App):
                         yield DataTable(id="calls", cursor_type="row")
                         with VerticalScroll(id="call_box"):
                             yield Markdown(id="call_detail")
+            with TabPane("Trash", id="tab_trash"):
+                with Horizontal(classes="split"):
+                    yield DataTable(id="trash", cursor_type="row")
+                    with VerticalScroll(id="trash_box"):
+                        yield Markdown(id="trash_detail")
         yield Static(id="keys")
 
     def on_mount(self) -> None:
@@ -239,6 +291,8 @@ class Board(App):
         t = self.query_one("#agents", DataTable)
         t.add_columns("id", "workspace", "status", "phase", "about")
         self.query_one("#calls", DataTable).add_columns("", "started", "what", "model", "time", "cost")
+        self.query_one("#trash", DataTable).add_columns("id", "status", "title", "trashed")
+        self.trash: dict = {}
         self.calls: list[dict] = []
         self.screen.set_class(self.size.width < self.NARROW_COLS, "narrow")
         self._render_keys(self.size.width)
@@ -265,6 +319,9 @@ class Board(App):
             panes.pop(pane, None)
         write_json(p, panes)
 
+    def on_tabbed_content_tab_activated(self, event) -> None:
+        self._render_keys(self.size.width)
+
     def on_resize(self, event) -> None:
         self.screen.set_class(event.size.width < self.NARROW_COLS, "narrow")
         self._render_keys(event.size.width)
@@ -272,8 +329,15 @@ class Board(App):
     def _render_keys(self, width: int) -> None:
         """Key guide packed into two rows, breaking only between keys."""
         items = []
-        for b in self.BINDINGS:
+        try:
+            tab = self.query_one(TabbedContent).active
+        except Exception:
+            tab = "tab_tasks"
+        wanted = self.GLOBAL_KEYS + self.TAB_KEYS.get(tab, [])
+        for b in sorted(self.BINDINGS, key=lambda b: wanted.index(b.key.split(",")[0]) if b.key.split(",")[0] in wanted else 99):
             key = b.key.split(",")[0]
+            if key not in wanted:
+                continue
             label = "Hide hidden" if (b.action == "toggle_hidden" and self.show_hidden) else b.description
             item = Text(f"{key} {label}")
             item.stylize("bold orange1", 0, len(key))
@@ -304,11 +368,17 @@ class Board(App):
             self._agents_sig = agents_sig
             self.records = {r["alias"]: r for r in tracked_records()}
             self._render_agents()
-        sig = self._mtimes([d / "graph.json", d / "tracked.json"])
+        sig = self._mtimes([d / "graph.json", d / "tracked.json", d / "trash.json"])
         if sig != self._sig:
             self._sig = sig
             self.graph = read_json(d / "graph.json", {})
+            self.trash = load_trash()
             self._render_tree()
+            self._render_trash()
+        tab = self.query_one(TabbedContent).active
+        if tab != getattr(self, "_keys_tab", None):
+            self._keys_tab = tab
+            self._render_keys(self.size.width)
         status = read_json(state_dir() / "status.json", {})
         self.calls, self.syncs = activity.load()
         self._render_status(status)
@@ -551,6 +621,23 @@ class Board(App):
         return "\n".join(out)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.data_table.id == "trash":
+            tid = event.row_key.value if event.row_key else None
+            e = self.trash.get(tid)
+            md = self.query_one("#trash_detail", Markdown)
+            if e:
+                t = e["task"]
+                md.update("\n".join([
+                    f"## {tid} · {t['title']}",
+                    f"**Status**: {t['status']}  ·  **Projects**: {', '.join(t.get('projects', [])) or '—'}",
+                    "",
+                    f"**Trashed**: {_ago(e['trashed_at'])}",
+                    "",
+                    t.get("detail", ""),
+                    "",
+                    "_u: restore to the board · X: delete forever_",
+                ]))
+            return
         if event.data_table.id == "calls":
             self.on_data_table_row_highlighted_calls(event.row_key.value if event.row_key else None)
             return
@@ -588,6 +675,65 @@ class Board(App):
 
     def action_workspaces(self) -> None:
         self.push_screen(Workspaces(), lambda _: self.poll())
+
+    def _render_trash(self) -> None:
+        table = self.query_one("#trash", DataTable)
+        keep = table.cursor_row
+        table.clear()
+        for tid, e in sorted(self.trash.items(), key=lambda kv: -kv[1]["trashed_at"]):
+            t = e["task"]
+            icon, color = ICON.get(t["status"], ("?", "white"))
+            table.add_row(tid, Text(icon, style=color), t["title"], _ago(e["trashed_at"]), key=tid)
+        if table.row_count:
+            table.move_cursor(row=min(keep, table.row_count - 1))
+        else:
+            self.query_one("#trash_detail", Markdown).update(
+                "_Trash is empty. Press t on a task to move it here._"
+            )
+
+    def _trash_cursor(self) -> str | None:
+        table = self.query_one("#trash", DataTable)
+        if self.query_one(TabbedContent).active != "tab_trash" or not table.row_count:
+            return None
+        return table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+
+    def action_trash_task(self) -> None:
+        if self.query_one(TabbedContent).active != "tab_tasks":
+            return
+        key = self._current_key()
+        if not key or key[0] != "task":
+            self.notify("Select a task first", severity="warning")
+            return
+        self.query_one(Tree).action_cursor_down()  # Land on a neighbour after it's gone.
+        if trash_task(key[1]):
+            self.notify(f"{key[1]} moved to Trash (u restores it there)")
+        self.poll()
+
+    def action_restore_task(self) -> None:
+        tid = self._trash_cursor()
+        if tid and restore_task(tid):
+            self.notify(f"{tid} restored to the board")
+            self.poll()
+
+    def action_delete_forever(self) -> None:
+        tid = self._trash_cursor()
+        if not tid:
+            if self.query_one(TabbedContent).active != "tab_trash":
+                self.notify("Delete forever only works in the Trash tab", severity="warning")
+            return
+        title = self.trash.get(tid, {}).get("task", {}).get("title", "")
+
+        def done(yes: bool) -> None:
+            if yes and delete_forever(tid):
+                self.notify(f"{tid} deleted")
+                self.poll()
+
+        self.push_screen(Confirm(
+            f"Permanently delete {tid}: {title}?\n\n"
+            "It leaves the trash, and the model is no longer told about it, "
+            "so it may come back if an agent works on it again.",
+            "Delete forever",
+        ), done)
 
     @property
     def hidden(self) -> set[str]:
