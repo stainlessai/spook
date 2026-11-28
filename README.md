@@ -110,7 +110,7 @@ herdr server reload-config
 | `a` | Start an agent for the selected task |
 | `c` | Mark the selected task done by hand, or reopen a done task (again to undo) |
 | `n` | Add or delete private notes on the selected task |
-| `s` | Cycle the task sort: by concern; by status (blocked, unowned, in progress, waiting on dependencies, open, done, dropped); as a dependency tree (each task with the tasks it depends on beneath it); or by your tags (a task with several tags shows under each, untagged ones last) |
+| `s` | Cycle the task sort: by concern; by status (blocked, unowned, in progress, waiting on dependencies, open, done, dropped); as a dependency tree (each task with the tasks it depends on beneath it); by your tags (a task with several tags shows under each, untagged ones last); or by owner agent (a task with several owners shows under each, unowned ones last) |
 | `#` | Tag the task: one-word tags of your own, with existing tags suggested as you type |
 | `f` | Show only the tasks with one of your tags, or untagged ones (`f` again to change or clear) |
 | `x` | Hide the selected completed task (on a hidden one: unhide it) |

@@ -39,7 +39,7 @@ ICON = {
 # Task sort modes, cycled with `s`. "concern" is the grouped tree; "status" groups
 # by what needs attention, most urgent first; "dependencies" nests each task's
 # dependencies under it.
-SORT_MODES = ("concern", "status", "dependencies", "tags")
+SORT_MODES = ("concern", "status", "dependencies", "tags", "owner")
 STATUS_GROUPS = [
     ("blocked", "Blocked", "red"),
     ("unowned", "Unowned", "magenta"),
@@ -580,7 +580,8 @@ class Board(App):
             ("s", "Sort", "Cycle how tasks are grouped: by concern; by status (blocked, unowned, "
              "in progress, waiting on dependencies, open, done, dropped); or as a dependency tree, "
              "each task with the tasks it depends on beneath it; or by your tags (a task with "
-             "several tags shows under each, untagged ones last)."),
+             "several tags shows under each, untagged ones last); or by owner agent (a task with "
+             "several owners shows under each, unowned ones last)."),
             ("g", "Jump to agent", "Focus the agent that owns the task and type a prompt pointing it at the "
              "task's brief, including notes it hasn't seen (typed, not sent; only when the agent is idle, "
              "and not twice before it takes a turn). On an unowned task, or one whose agent's pane closed, "
@@ -948,6 +949,8 @@ class Board(App):
             self._render_by_dependencies(tree, tasks, by_id)
         elif self.sort_mode == "tags":
             self._render_by_tags(tree, tasks, by_id)
+        elif self.sort_mode == "owner":
+            self._render_by_owner(tree, tasks, by_id)
         else:
             self._render_by_concern(tree, tasks, by_id, concerns)
 
@@ -1070,6 +1073,32 @@ class Board(App):
             for t in sorted(items, key=order):
                 node.add_leaf(self._task_label(t, by_id), data=("task", t["id"]))
 
+    def _render_by_owner(self, tree, tasks, by_id) -> None:
+        """One group per owner agent, in id order; a task with several owners is under each."""
+        groups: dict[str, list] = {}
+        for t in tasks:
+            for o in t.get("owners") or [None]:
+                groups.setdefault(o, []).append(t)
+        order = lambda t: (list(ICON).index(self._status_group(t, by_id)), _task_num(t["id"]))
+        names = sorted((o for o in groups if o), key=_task_num) + ([None] if None in groups else [])
+        for o in names:
+            items = groups[o]
+            if o:
+                r = self.records.get(o)
+                label = Text.assemble((f"{o} ", "bold cyan"))
+                if r:
+                    label.append(f"{r.get('workspace', '')} · {(r.get('record') or {}).get('title', '')} ", style="grey62")
+                    if r.get("gone"):
+                        label.append("closed ", style="grey50 italic")
+                else:
+                    label.append("not on this Mission ", style="grey50 italic")
+            else:
+                label = Text("Unowned ", style="bold magenta")
+            label.append(f"({len(items)})", style="grey62")
+            node = tree.root.add(label, data=("owner", o or ""), expand=True)
+            for t in sorted(items, key=order):
+                node.add_leaf(self._task_label(t, by_id), data=("task", t["id"]))
+
     def action_cycle_sort(self) -> None:
         if self.query_one(TabbedContent).active != "tab_tasks":
             return
@@ -1144,6 +1173,16 @@ class Board(App):
                 if tid in by_id:
                     lines.append(f"- **{tid}**: {by_id[tid]['title']} ({by_id[tid]['status']})")
             md.update("\n".join(lines))
+        elif kind == "owner":
+            ts = [t for t in g.get("tasks", []) if (key in t.get("owners", []) if key else not t.get("owners"))]
+            r = self.records.get(key) if key else None
+            head = f"## {self._owner_label(key)}" if key else "## Unowned"
+            if r:
+                rec = r.get("record") or {}
+                head += f"\n\n{rec.get('title', '')}  ·  {'closed' if r.get('gone') else r.get('agent_status')}"
+            md.update(head + "\n\n" + "\n".join(
+                f"- {self._icon(t, by_id)[0]} **{t['id']}**: {t['title']}" for t in sorted(ts, key=lambda t: _task_num(t["id"])))
+                + ("\n\n_Agents tab: its summary · g on a task: jump to it_" if key else ""))
         elif kind == "tag":
             task_tags = getattr(self, "task_tags", {})
             ts = [t for t in g.get("tasks", []) if (key in task_tags.get(t["id"], []) if key else not task_tags.get(t["id"]))]
