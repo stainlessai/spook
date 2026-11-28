@@ -183,6 +183,7 @@ def cmd_task(argv: list[str]) -> None:
                 msg += f"  (ignored dependencies not on this board: {', '.join(unknown)})"
             print(msg)
             log(msg)
+        print(WHO_SEES)
     elif sub in ("done", "reopen") and len(argv) > 1 and not argv[1].startswith("--"):
         tid = argv[1].strip().upper()
         mids, alias = _target_missions(argv)
@@ -199,6 +200,7 @@ def cmd_task(argv: list[str]) -> None:
             log(f"{msg} (by {alias})")
         if not hits:
             sys.exit(f"no task {tid} on " + ", ".join(f"'{missions.info(m)['name']}'" for m in mids))
+        print(WHO_SEES)
     elif sub == "update" and len(argv) > 1 and not argv[1].startswith("--"):
         cmd_task_update(argv[1].strip().upper(), argv[2:])
     elif sub == "list":
@@ -211,6 +213,12 @@ def cmd_task(argv: list[str]) -> None:
                 print(f"{t['id']:>5}  {t['status']:<11} {','.join(t.get('owners', [])) or '-':<8} {t['title']}{deps}")
     else:
         sys.exit(__doc__)
+
+
+# Agents tend to guess what happens next ("others will see it at the next snapshot").
+WHO_SEES = ("The board shows this now, and spook's analysis keeps it. Other agents are not "
+            "notified: they see it only if they run `spook task list` or the human points them "
+            "at the task (a brief, or g on the board). Tell the human if another agent needs to know.")
 
 
 def _ids(v: str | None) -> list[str]:
@@ -279,6 +287,7 @@ def cmd_task_update(tid: str, argv: list[str]) -> None:
         log(f"{msg} (by {alias})")
     if not hits:
         sys.exit(f"no task {tid} on " + ", ".join(f"'{missions.info(m)['name']}'" for m in mids))
+    print(WHO_SEES)
 
 
 def cmd_install_cli() -> None:

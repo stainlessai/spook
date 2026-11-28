@@ -110,7 +110,9 @@ herdr server reload-config
 | `a` | Start an agent for the selected task |
 | `c` | Mark the selected task done by hand, or reopen a done task (again to undo) |
 | `n` | Add or delete private notes on the selected task |
-| `s` | Cycle the task sort: by concern; by status (blocked, unowned, in progress, waiting on dependencies, open, done, dropped); or as a dependency tree (each task with the tasks it depends on beneath it) |
+| `s` | Cycle the task sort: by concern; by status (blocked, unowned, in progress, waiting on dependencies, open, done, dropped); as a dependency tree (each task with the tasks it depends on beneath it); or by your tags (a task with several tags shows under each, untagged ones last) |
+| `#` | Tag the task: one-word tags of your own, with existing tags suggested as you type |
+| `f` | Show only the tasks with one of your tags, or untagged ones (`f` again to change or clear) |
 | `x` | Hide the selected completed task (on a hidden one: unhide it) |
 | `d` | Show or hide hidden tasks |
 | `t` | Move the selected task to the Trash tab |
@@ -190,6 +192,21 @@ working on the task:
   On the Agents tab, `g` only types a prompt when there are unseen notes.
 
 Known gap: switching to an agent's tab yourself doesn't deliver notes. Use `g`.
+
+### Tags
+
+Press `#` on a task to tag it with single words of your own, like `urgent` or
+`infra`. As you type, existing tags are listed below the input (most used
+first, from every Mission); press ↓ and enter to reuse one. Typing a tag that
+exists with different capitals reuses it as is. Press ↑ to reach the task's
+tags and delete to remove one. Tags show after the task's title and in its
+details. Like notes, they're private: never sent to spook's models.
+
+To focus on one tag, press `f` and pick it (or "Untagged"). The board then
+shows only those tasks, and alerts about them, in whichever sort you're
+using. The status line shows the filter. Press `f` again and pick "All tasks"
+to clear it. Switching Missions clears it too. `s` also cycles to a view
+grouped by tag.
 
 ### Hiding, trash and delete
 
@@ -347,6 +364,7 @@ Per Mission, in `missions/<id>/`:
 | `graph.json` | Concerns, tasks, alerts |
 | `hidden_tasks.json` | Completed tasks you hid with `x` |
 | `added_tasks.json` | Tasks added with `spook task add` (kept by the model) |
+| `task_tags.json` | Your tags on tasks (`#`) |
 | `task_edits.json` | Task fields set with `spook task update` (kept by the model until released) |
 | `trash.json` | Trashed tasks, with a snapshot of each |
 | `status_overrides.json` | Statuses set by hand: by you with `c`, or by an agent with `spook task done/reopen` |

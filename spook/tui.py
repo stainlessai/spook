@@ -18,7 +18,7 @@ from textual.widgets import (
     TabbedContent, TabPane, TextArea, Tree,
 )
 
-from . import activity, herdr, launch, missions, notes
+from . import activity, herdr, launch, missions, notes, tags
 from .paths import read_json, state_dir, write_json
 from .worker import (
     delete_forever, live_agents, load_added, load_edits, load_overrides, load_trash, mission_records, restore_task,
@@ -39,7 +39,7 @@ ICON = {
 # Task sort modes, cycled with `s`. "concern" is the grouped tree; "status" groups
 # by what needs attention, most urgent first; "dependencies" nests each task's
 # dependencies under it.
-SORT_MODES = ("concern", "status", "dependencies")
+SORT_MODES = ("concern", "status", "dependencies", "tags")
 STATUS_GROUPS = [
     ("blocked", "Blocked", "red"),
     ("unowned", "Unowned", "magenta"),
@@ -329,6 +329,151 @@ class NotesEditor(ModalScreen[None]):
         self.dismiss(None)
 
 
+class TagEditor(ModalScreen[None]):
+    """Your tags on one task: single words, reused across tasks and Missions."""
+
+    BINDINGS = [Binding("escape", "close", "Close"), Binding("delete,backspace", "remove_tag", "Remove tag")]
+    DEFAULT_CSS = """
+    TagEditor { align: center middle; }
+    #tags_box { width: 70; max-width: 96%; height: auto; max-height: 96%; border: round $accent;
+                padding: 1 2; background: $panel; }
+    #tags_box Label { margin-top: 1; color: $text-muted; }
+    #tags_title { text-style: bold; }
+    #tag_list { height: auto; max-height: 6; }
+    #tag_sugg { height: auto; max-height: 10; }
+    """
+
+    def __init__(self, task: dict) -> None:
+        super().__init__()
+        self.task_ = task
+        self.sugg: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="tags_box"):
+            yield Static(f"Tags on {self.task_['id']}: {self.task_['title']}", id="tags_title")
+            yield Static("Private, like notes: never sent to spook's models.", classes="muted")
+            yield Label("On this task (↑, then delete to remove)")
+            yield OptionList(id="tag_list")
+            yield Label("Add a tag (one word; enter adds, ↓ picks an existing one)")
+            yield Input(placeholder="e.g. urgent", id="tag_in")
+            yield OptionList(id="tag_sugg")
+
+    def on_mount(self) -> None:
+        self._reload()
+        self.query_one("#tag_in", Input).focus()
+
+    def _reload(self) -> None:
+        ol = self.query_one("#tag_list", OptionList)
+        ol.clear_options()
+        self.items = tags.for_task(self.task_["id"])
+        ol.disabled = not self.items
+        for t in self.items or ["(none yet)"]:
+            ol.add_option(f"#{t}" if self.items else t)
+        if self.items:
+            ol.highlighted = 0
+        self._suggest(self.query_one("#tag_in", Input).value)
+
+    def _suggest(self, text: str) -> None:
+        """Existing tags that match what's typed, most used first."""
+        q = text.strip().lstrip("#").lower()
+        mine = {t.lower() for t in self.items}
+        counts = tags.all_tags()
+        self.sugg = [t for t, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+                     if t.lower() not in mine and q in t.lower()]
+        ol = self.query_one("#tag_sugg", OptionList)
+        ol.clear_options()
+        for t in self.sugg:
+            ol.add_option(f"#{t}  ({counts[t]})")
+        ol.display = bool(self.sugg)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self._suggest(event.value)
+
+    def on_key(self, event) -> None:
+        box = self.query_one("#tag_in", Input)
+        sugg = self.query_one("#tag_sugg", OptionList)
+        if event.key == "down" and self.focused is box and self.sugg:
+            sugg.focus()
+            sugg.highlighted = 0
+            event.stop()
+        elif event.key == "up" and self.focused is box and self.items:
+            self.query_one("#tag_list", OptionList).focus()
+            event.stop()
+        elif self.focused is sugg and event.character and event.character.isprintable() and event.key != "space":
+            box.focus()  # Typing on the dropdown goes back to the input.
+            box.insert_text_at_cursor(event.character)
+            event.stop()
+
+    def _add(self, text: str) -> None:
+        tag = tags.add(self.task_["id"], text)
+        box = self.query_one("#tag_in", Input)
+        if not tag:
+            self.app.notify("A tag is one word: letters, digits, - _ or .", severity="warning")
+            return
+        box.value = ""
+        self._reload()
+        box.focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.value.strip():
+            self._add(event.value)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id == "tag_sugg" and self.sugg:
+            self._add(self.sugg[event.option_index])
+
+    def action_remove_tag(self) -> None:
+        ol = self.query_one("#tag_list", OptionList)
+        if self.focused is not ol or ol.highlighted is None or not self.items:
+            return
+        tags.remove(self.task_["id"], self.items[ol.highlighted])
+        self._reload()
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class TagFilter(ModalScreen[tuple | None]):
+    """Pick a tag to show only its tasks (or untagged ones, or everything)."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    DEFAULT_CSS = """
+    TagFilter { align: center middle; }
+    #filter_box { width: 50; max-width: 96%; height: auto; max-height: 90%; border: round $accent;
+                  padding: 1 2; background: $panel; }
+    #filter_title { text-style: bold; margin-bottom: 1; }
+    #filter_list { height: auto; max-height: 20; }
+    """
+
+    def __init__(self, counts: dict[str, int], untagged: int, current) -> None:
+        super().__init__()
+        self.choices: list = [None] + sorted(counts, key=str.lower) + ([""] if untagged else [])
+        self.counts, self.untagged, self.current = counts, untagged, current
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="filter_box"):
+            yield Static("Show only tasks tagged…", id="filter_title")
+            yield OptionList(id="filter_list")
+
+    def on_mount(self) -> None:
+        ol = self.query_one(OptionList)
+        for c in self.choices:
+            if c is None:
+                ol.add_option("All tasks (no filter)")
+            elif c == "":
+                ol.add_option(f"Untagged  ({self.untagged})")
+            else:
+                ol.add_option(f"#{c}  ({self.counts[c]})")
+        ol.highlighted = self.choices.index(self.current) if self.current in self.choices else 0
+        ol.focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss((self.choices[event.option_index],))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class Confirm(ModalScreen[bool]):
     BINDINGS = [Binding("escape", "no", "Cancel")]
     DEFAULT_CSS = """
@@ -399,6 +544,8 @@ class Board(App):
         Binding("a", "assign", "Start agent"),
         Binding("c", "close_task", "Done"),
         Binding("n", "notes", "Notes"),
+        Binding("number_sign", "tags", "Tags"),
+        Binding("f", "tag_filter", "Filter"),
         Binding("s", "cycle_sort", "Sort"),
         Binding("x", "hide_task", "Hide"),
         Binding("d", "toggle_hidden", "Show hidden"),
@@ -427,7 +574,8 @@ class Board(App):
             ("↑ ↓ / enter", "Move / fold", "Move through concerns, tasks and alerts; enter folds a group."),
             ("s", "Sort", "Cycle how tasks are grouped: by concern; by status (blocked, unowned, "
              "in progress, waiting on dependencies, open, done, dropped); or as a dependency tree, "
-             "each task with the tasks it depends on beneath it."),
+             "each task with the tasks it depends on beneath it; or by your tags (a task with "
+             "several tags shows under each, untagged ones last)."),
             ("g", "Jump to agent", "Focus the agent that owns the task and type a prompt pointing it at the "
              "task's brief, including notes it hasn't seen (typed, not sent; only when the agent is idle, "
              "and not twice before it takes a turn). On an unowned task, or one whose agent's pane closed, "
@@ -436,6 +584,10 @@ class Board(App):
             ("c", "Done / reopen", "Mark the task done by hand, or reopen a done task. Again to undo. Your call wins over the model."),
             ("n", "Notes", "Add or delete private notes on the task, for agents working on it. "
              "Never sent to spook's models."),
+            ("#", "Tags", "Add your own one-word tags to the task. Existing tags are suggested as you type "
+             "(↓ to pick one); ↑ to the task's tags, then delete removes one. Private, like notes."),
+            ("f", "Filter", "Show only the tasks with one of your tags (or untagged ones). "
+             "The status line shows the filter; f again to change or clear it."),
             ("x", "Hide", "Hide a completed task from the board (display only)."),
             ("d", "Show hidden", "Show or hide the tasks you hid."),
             ("t", "Trash", "Move any task to the Trash tab. The model is told not to recreate it."),
@@ -456,6 +608,7 @@ class Board(App):
     def __init__(self) -> None:
         super().__init__()
         self.show_hidden = False
+        self.tag_filter: str | None = None  # a tag, "" for untagged, or None for all
         self.graph: dict = {}
         self.records: dict[str, dict] = {}  # alias -> agent record
         self._sig = None
@@ -580,6 +733,7 @@ class Board(App):
             self._sig = self._agents_sig = None
             self._selected_key = None
             self.show_hidden = False
+            self.tag_filter = None  # Tags are per Mission.
         md = missions.mission_dir(mid)
         # Agent files change constantly during analysis; only redraw the tree when the graph does.
         agents_sig = self._mtimes([md / "agents.json", *sorted((d / "agents").glob("*.json"))])
@@ -589,13 +743,15 @@ class Board(App):
             self._render_agents()
         sig = self._mtimes([d / "missions.json", md / "graph.json", md / "agents.json", md / "trash.json",
                             md / "status_overrides.json", md / "task_notes.json", md / "hidden_tasks.json",
-                            md / "added_tasks.json", md / "task_edits.json"])
+                            md / "added_tasks.json", md / "task_edits.json",
+                            md / "task_tags.json"])
         if sig != self._sig:
             self._sig = sig
             self.graph = read_json(md / "graph.json", {})
             self.overrides = load_overrides()
             self.added = load_added()
             self.edits = load_edits()
+            self.task_tags = tags.load()
             self.task_notes = notes.load()
             self.trash = load_trash()
             self._render_tree()
@@ -620,6 +776,8 @@ class Board(App):
         left = Text.assemble((name, "bold"), f" · {len(self.records)} agents · {n_t} open · {n_done} done · {n_a} alerts")
         if self.sort_mode != "concern":
             left.append(f" · by {self.sort_mode}")
+        if self.tag_filter is not None:
+            left.append(f" · only {'#' + self.tag_filter if self.tag_filter else 'untagged'}", style="bold orchid")
         if not missions.members():
             left = Text.assemble((name, "bold"), " · no agents yet: press w to add some")
         running = [c for c in self.calls if c["state"] == "running"]
@@ -718,6 +876,8 @@ class Board(App):
         ov = getattr(self, "overrides", {}).get(t["id"])
         if ov:
             txt.append(f"  ({ov.get('by') or 'you'})", style="grey50 italic")
+        for tg in getattr(self, "task_tags", {}).get(t["id"], []):
+            txt.append(f"  #{tg}", style="orchid")
         n = len(getattr(self, "task_notes", {}).get(t["id"], []))
         if n:
             txt.append(f"  ✎{n}", style="khaki1")
@@ -735,12 +895,18 @@ class Board(App):
             if self.show_hidden or t["id"] not in self.hidden or t["status"] not in ("done", "dropped")
         ]
         by_id = {t["id"]: t for t in g.get("tasks", [])}
+        alerts = list(enumerate(g.get("alerts", [])))
+        if self.tag_filter is not None:
+            tt = getattr(self, "task_tags", {})
+            tasks = [t for t in tasks if (self.tag_filter in tt.get(t["id"], []) if self.tag_filter
+                                          else not tt.get(t["id"]))]
+            shown = {t["id"] for t in tasks}
+            alerts = [(i, a) for i, a in alerts if shown & set(a.get("task_ids", []))]
 
-        alerts = g.get("alerts", [])
         if alerts:
             an = tree.root.add(Text(f"Alerts ({len(alerts)})", style="bold yellow"), data=("alerts", None), expand=True)
             order = {"critical": 0, "warn": 1, "info": 2}
-            for i, a in sorted(enumerate(alerts), key=lambda x: order.get(x[1]["severity"], 3)):
+            for i, a in sorted(alerts, key=lambda x: order.get(x[1]["severity"], 3)):
                 icon, style = SEV.get(a["severity"], ("?", ""))
                 an.add_leaf(Text.assemble((f"{icon} ", style), a["text"]), data=("alert", i))
 
@@ -752,6 +918,8 @@ class Board(App):
             self._render_by_status(tree, tasks, by_id)
         elif self.sort_mode == "dependencies":
             self._render_by_dependencies(tree, tasks, by_id)
+        elif self.sort_mode == "tags":
+            self._render_by_tags(tree, tasks, by_id)
         else:
             self._render_by_concern(tree, tasks, by_id, concerns)
 
@@ -762,7 +930,10 @@ class Board(App):
                 lbl = self._task_label(t, by_id)
                 lbl.stylize("grey50")
                 node.add_leaf(lbl, data=("task", t["id"]))
-        if not tasks and not alerts and not departed:
+        if not tasks and self.tag_filter is not None:
+            tree.root.add_leaf(Text(f"No tasks {'tagged #' + self.tag_filter if self.tag_filter else 'untagged'}. "
+                                    "Press f to change the filter.", style="italic"))
+        elif not tasks and not alerts and not departed:
             tree.root.add_leaf(Text("Nothing yet. Add agents with w; analysis runs when they finish a turn.", style="italic"))
         self.call_after_refresh(self._finish_rebuild, keep)
 
@@ -854,6 +1025,23 @@ class Board(App):
             for tid in sorted(alone, key=order):
                 node.add_leaf(self._task_label(visible[tid], by_id), data=("task", tid))
 
+    def _render_by_tags(self, tree, tasks, by_id) -> None:
+        """One group per tag, alphabetical; a task with several tags is under each."""
+        task_tags = getattr(self, "task_tags", {})
+        groups: dict[str, list] = {}
+        for t in tasks:
+            for tg in task_tags.get(t["id"]) or [None]:
+                groups.setdefault(tg, []).append(t)
+        order = lambda t: (list(ICON).index(self._status_group(t, by_id)), _task_num(t["id"]))
+        names = sorted((g for g in groups if g), key=str.lower) + ([None] if None in groups else [])
+        for tg in names:
+            items = groups[tg]
+            label = Text.assemble((f"#{tg} " if tg else "Untagged ", "bold orchid" if tg else "bold grey62"),
+                                  (f"({len(items)})", "grey62"))
+            node = tree.root.add(label, data=("tag", tg or ""), expand=True)
+            for t in sorted(items, key=order):
+                node.add_leaf(self._task_label(t, by_id), data=("task", t["id"]))
+
     def action_cycle_sort(self) -> None:
         if self.query_one(TabbedContent).active != "tab_tasks":
             return
@@ -927,6 +1115,11 @@ class Board(App):
                 if tid in by_id:
                     lines.append(f"- **{tid}**: {by_id[tid]['title']} ({by_id[tid]['status']})")
             md.update("\n".join(lines))
+        elif kind == "tag":
+            task_tags = getattr(self, "task_tags", {})
+            ts = [t for t in g.get("tasks", []) if (key in task_tags.get(t["id"], []) if key else not task_tags.get(t["id"]))]
+            md.update(f"## {'#' + key if key else 'Untagged'}\n\n" + "\n".join(
+                f"- {self._icon(t, by_id)[0]} **{t['id']}**: {t['title']}" for t in sorted(ts, key=lambda t: _task_num(t["id"]))))
         elif kind == "deps":
             md.update("## No dependencies\n\nTasks that neither depend on another task on the board "
                       "nor are depended on.")
@@ -954,6 +1147,8 @@ class Board(App):
             f"**Status**: {t['status']}  ·  **Projects**: {', '.join(t.get('projects', [])) or '—'}",
             "",
             f"**Owners**: {', '.join(self._owner_label(o) for o in t.get('owners', [])) or '_unowned_'}",
+            *(["", f"**Tags**: {' '.join('#' + x for x in getattr(self, 'task_tags', {}).get(t['id'], []))}"]
+              if getattr(self, "task_tags", {}).get(t["id"]) else []),
             "",
             t.get("detail", ""),
         ]
@@ -1352,6 +1547,38 @@ class Board(App):
             self.notify("Select a task first", severity="warning")
             return
         self.push_screen(NotesEditor(task), lambda _: self.poll())
+
+    def action_tag_filter(self) -> None:
+        if self.query_one(TabbedContent).active != "tab_tasks":
+            return
+        tt = getattr(self, "task_tags", {})
+        ids = {t["id"] for t in self.graph.get("tasks", [])}
+        counts: dict[str, int] = {}
+        for tid, tgs in tt.items():
+            if tid in ids:
+                for x in tgs:
+                    counts[x] = counts.get(x, 0) + 1
+        if not counts:
+            self.notify("No tags on this Mission yet. Press # on a task to add one.", severity="warning")
+            return
+        untagged = len([i for i in ids if not tt.get(i)])
+
+        def done(choice) -> None:
+            if choice is None:
+                return
+            self.tag_filter = choice[0]
+            self._render_tree()
+
+        self.push_screen(TagFilter(counts, untagged, self.tag_filter), done)
+
+    def action_tags(self) -> None:
+        if self.query_one(TabbedContent).active != "tab_tasks":
+            return
+        task = self._selected_task()
+        if not task:
+            self.notify("Select a task first", severity="warning")
+            return
+        self.push_screen(TagEditor(task), lambda _: self.poll())
 
     def _selected_task(self) -> dict | None:
         """The task under the cursor, or the first task of a selected alert."""
