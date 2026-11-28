@@ -954,9 +954,15 @@ class Board(App):
             "",
             t.get("detail", ""),
         ]
-        if t.get("depends_on"):
+        finished = ("done", "dropped")
+        waiting = [d for d in t.get("depends_on", []) if by_id.get(d, {}).get("status") not in finished]
+        met = [d for d in t.get("depends_on", []) if by_id.get(d, {}).get("status") in finished]
+        if waiting:
             out += ["", "### Waiting on"]
-            out += [f"- **{d}**: {by_id[d]['title']} ({by_id[d]['status']})" if d in by_id else f"- {d}" for d in t["depends_on"]]
+            out += [f"- **{d}**: {by_id[d]['title']} ({by_id[d]['status']})" if d in by_id else f"- {d}" for d in waiting]
+        if met:
+            out += ["", "### Done dependencies"]
+            out += [f"- {ICON[by_id[d]['status']][0]} **{d}**: {by_id[d]['title']} ({by_id[d]['status']})" for d in met]
         if blocks:
             out += ["", "### Blocks"] + [f"- **{b['id']}**: {b['title']} ({b['status']})" for b in blocks]
         mine = getattr(self, "task_notes", {}).get(t["id"], [])
