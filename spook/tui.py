@@ -18,7 +18,7 @@ from textual.widgets import (
     TabbedContent, TabPane, TextArea, Tree,
 )
 
-from . import activity, herdr, launch, missions, notes, tags
+from . import activity, herdr, launch, messages, missions, notes, tags
 from .paths import read_json, state_dir, write_json
 from .worker import (
     delete_forever, live_agents, load_added, load_edits, load_overrides, load_trash, mission_records, restore_task,
@@ -590,11 +590,15 @@ class Board(App):
              "The status line shows the filter; f again to change or clear it."),
             ("x", "Hide", "Hide a completed task from the board (display only)."),
             ("d", "Show hidden", "Show or hide the tasks you hid."),
-            ("t", "Trash", "Move any task to the Trash tab. The model is told not to recreate it."),
+            ("t", "Trash", "Move any task to the Trash tab. The model is told not to recreate it. "
+             "On a message under 'Messages to deliver', discards it."),
+            ("g on a message", "Deliver", "Messages agents left with `spook tell` wait under 'Messages to "
+             "deliver'. g types them into the recipient's input box (not sent) for you to review and send."),
         ]),
         ("Agents", [
             ("g", "Jump to agent", "Focus the selected agent's pane, pointing it at notes it hasn't seen "
-             "on tasks it owns (typed, not sent)."),
+             "on tasks it owns and at messages other agents left for it (typed, not sent). "
+             "✉ shows how many messages are waiting."),
         ]),
         ("Activity", [
             ("↑ ↓", "Inspect", "Select a background analysis call to see its timing, size, cost and errors."),
@@ -736,15 +740,16 @@ class Board(App):
             self.tag_filter = None  # Tags are per Mission.
         md = missions.mission_dir(mid)
         # Agent files change constantly during analysis; only redraw the tree when the graph does.
-        agents_sig = self._mtimes([md / "agents.json", *sorted((d / "agents").glob("*.json"))])
+        agents_sig = self._mtimes([md / "agents.json", md / "messages.json", *sorted((d / "agents").glob("*.json"))])
         if agents_sig != self._agents_sig:
             self._agents_sig = agents_sig
             self.records = {r["alias"]: r for r in mission_records(mid)}
+            self.inbox = messages.pending()
             self._render_agents()
         sig = self._mtimes([d / "missions.json", md / "graph.json", md / "agents.json", md / "trash.json",
                             md / "status_overrides.json", md / "task_notes.json", md / "hidden_tasks.json",
                             md / "added_tasks.json", md / "task_edits.json",
-                            md / "task_tags.json"])
+                            md / "task_tags.json", md / "messages.json"])
         if sig != self._sig:
             self._sig = sig
             self.graph = read_json(md / "graph.json", {})
@@ -752,6 +757,7 @@ class Board(App):
             self.added = load_added()
             self.edits = load_edits()
             self.task_tags = tags.load()
+            self.inbox = messages.pending()
             self.task_notes = notes.load()
             self.trash = load_trash()
             self._render_tree()
@@ -881,6 +887,9 @@ class Board(App):
         n = len(getattr(self, "task_notes", {}).get(t["id"], []))
         if n:
             txt.append(f"  ✎{n}", style="khaki1")
+        m = len([x for x in getattr(self, "inbox", []) if x.get("task") == t["id"]])
+        if m:
+            txt.append(f"  ✉{m}", style="bold sky_blue1")
         return txt
 
     def _render_tree(self) -> None:
@@ -909,6 +918,15 @@ class Board(App):
             for i, a in sorted(alerts, key=lambda x: order.get(x[1]["severity"], 3)):
                 icon, style = SEV.get(a["severity"], ("?", ""))
                 an.add_leaf(Text.assemble((f"{icon} ", style), a["text"]), data=("alert", i))
+
+        inbox = getattr(self, "inbox", [])
+        if inbox:
+            mn = tree.root.add(Text(f"Messages to deliver ({len(inbox)})", style="bold sky_blue1"),
+                               data=("messages", None), expand=True)
+            for m in inbox:
+                about = f" (re {m['task']})" if m.get("task") else ""
+                mn.add_leaf(Text.assemble((f"✉ {m['from']} → {m['to']}{about}: ", "sky_blue1"), m["text"]),
+                            data=("msg", m["id"]))
 
         concerns = {c["id"]: c for c in g.get("concerns", [])}
         departed = [t for t in tasks if t.get("departed")]
@@ -1084,7 +1102,8 @@ class Board(App):
         table.clear()
         for alias, r in sorted(self.records.items(), key=lambda kv: int(kv[0][1:])):
             rec = r["record"]
-            table.add_row(alias, r["workspace"], r.get("agent_status") or "?", rec.get("phase", ""), rec.get("title", ""), key=alias)
+            n = len([m for m in getattr(self, "inbox", []) if m["to"] == alias])
+            table.add_row(Text.assemble(alias, (f" ✉{n}", "bold sky_blue1") if n else ""), r["workspace"], r.get("agent_status") or "?", rec.get("phase", ""), rec.get("title", ""), key=alias)
         if table.row_count:
             table.move_cursor(row=min(keep, table.row_count - 1))
 
@@ -1115,6 +1134,18 @@ class Board(App):
                 if tid in by_id:
                     lines.append(f"- **{tid}**: {by_id[tid]['title']} ({by_id[tid]['status']})")
             md.update("\n".join(lines))
+        elif kind == "msg":
+            m = next((x for x in getattr(self, "inbox", []) if x["id"] == key), None)
+            if m:
+                about = f" about **{m['task']}**: {by_id[m['task']]['title']}" if m.get("task") in by_id else ""
+                md.update("\n".join([
+                    f"## Message from {self._owner_label(m['from'])} to {self._owner_label(m['to'])}",
+                    f"Left {_ago(m['at'])}{about}", "", m["text"], "",
+                    f"_Not delivered yet. g: type it into {m['to']}'s input (not sent) · t: discard it_",
+                ]))
+        elif kind == "messages":
+            md.update("## Messages to deliver\n\nAgents left these with `spook tell`. Spook doesn't send them: "
+                      "g on a message (or on the agent) types it into the recipient's input box for you to send.")
         elif kind == "tag":
             task_tags = getattr(self, "task_tags", {})
             ts = [t for t in g.get("tasks", []) if (key in task_tags.get(t["id"], []) if key else not task_tags.get(t["id"]))]
@@ -1238,7 +1269,11 @@ class Board(App):
             out += [f"    - provides: {p}" for p in w.get("provides", [])]
         if rec.get("open_questions"):
             out += ["", "### Open questions"] + [f"- {q}" for q in rec["open_questions"]]
-        out += ["", "_g: jump to this agent_"]
+        waiting = [m for m in getattr(self, "inbox", []) if m["to"] == alias]
+        if waiting:
+            out += ["", "### Messages waiting for it"]
+            out += [f"- from **{m['from']}**{' about ' + m['task'] if m.get('task') else ''}: {m['text']}" for m in waiting]
+        out += ["", "_g: jump to this agent" + (" and type its messages (not sent)" if waiting else "") + "_"]
         md.update("\n".join(out))
 
     # ---------------------------------------------------------------- actions
@@ -1412,6 +1447,12 @@ class Board(App):
         if self.query_one(TabbedContent).active != "tab_tasks":
             return
         key = self._current_key()
+        if key and key[0] == "msg":
+            self.query_one(Tree).action_cursor_down()
+            messages.discard(key[1])
+            self.notify("Message discarded")
+            self.poll()
+            return
         if not key or key[0] != "task":
             self.notify("Select a task first", severity="warning")
             return
@@ -1483,6 +1524,10 @@ class Board(App):
             table = self.query_one("#agents", DataTable)
             if table.row_count:
                 alias = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        elif (self._current_key() or ("",))[0] == "msg":
+            m = next((x for x in getattr(self, "inbox", []) if x["id"] == self._current_key()[1]), None)
+            alias = m["to"] if m else None
+            on_agents = True  # Deliver what's waiting for that agent; no task prompt.
         else:
             t = self._selected_task()
             owners = t.get("owners", []) if t else []
@@ -1517,11 +1562,11 @@ class Board(App):
                 result = launch.point_at_task(r, task, owned, self.graph, force=again)
                 self._g_warned = (r["pane_id"], task["id"]) if result.startswith("pending:") else None
             else:
-                result = launch.deliver_notes(r["pane_id"], owned, self.graph)
+                result = launch.deliver_pending(r, owned, self.graph)
         except Exception as e:
             result = f"error:{e}"
         if result == "typed":
-            what = f"at {task['id']}" if task and not on_agents else "at your new notes"
+            what = f"at {task['id']}" if task and not on_agents else "at what was waiting for it"
             self.notify(f"Typed a prompt into {alias} pointing it {what}. Review it and press Enter.")
         elif result.startswith("pending:"):
             self.notify(f"{alias} already has a prompt for {result[8:]} typed and not sent. Send or clear it, "

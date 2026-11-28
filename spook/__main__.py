@@ -23,6 +23,11 @@
                        title, detail, status, concern, owners or depends back to the model)
   task list [--mission ID]
                        the Mission's tasks: id, status, owners, title, dependencies
+  tell AGENT TEXT [--task TASK] [--mission ID]
+                       leave a message for another agent (A4). Not sent: the human sees it
+                       on the board and delivers it (g types it into the agent, unsent).
+  agents [--mission ID]
+                       the Mission's agents: id, status, workspace, what they're doing
   install-cli          put a `spook` command in ~/.local/bin so agents can run it
   open                 dock the board on the right of the current tab (or close it)
   board                run the board UI in this terminal
@@ -35,7 +40,7 @@ import json
 import os
 import sys
 
-from . import herdr, missions
+from . import herdr, messages, missions
 from .paths import log, read_json, state_dir
 from .analyze import STATUS
 from .worker import (
@@ -217,8 +222,8 @@ def cmd_task(argv: list[str]) -> None:
 
 # Agents tend to guess what happens next ("others will see it at the next snapshot").
 WHO_SEES = ("The board shows this now, and spook's analysis keeps it. Other agents are not "
-            "notified: they see it only if they run `spook task list` or the human points them "
-            "at the task (a brief, or g on the board). Tell the human if another agent needs to know.")
+            "notified. If one needs to know, leave it a message: spook tell A4 \"...\" [--task T7] "
+            "(the human delivers it). `spook agents` lists the agents.")
 
 
 def _ids(v: str | None) -> list[str]:
@@ -290,6 +295,49 @@ def cmd_task_update(tid: str, argv: list[str]) -> None:
     print(WHO_SEES)
 
 
+def cmd_tell(argv: list[str]) -> None:
+    if len(argv) < 2 or argv[0].startswith("--") or argv[1].startswith("--"):
+        sys.exit(__doc__)
+    to, text = argv[0].strip().upper(), argv[1].strip()
+    if not text:
+        sys.exit("the message can't be empty")
+    task = (_opt(argv, "--task") or "").strip().upper() or None
+    hits, sender = _caller()
+    if _opt(argv, "--mission"):
+        mids = [_mission_arg(argv)]
+    else:
+        mids = [m for m in (hits or [missions.active()])
+                if to in {r["alias"] for r in mission_records(m)}]
+    if not mids:
+        sys.exit(f"{to} isn't on any of your Missions. `spook agents` lists the agents you can message.")
+    if to == sender:
+        sys.exit("that's you")
+    for mid in mids:
+        recs = {r["alias"]: r for r in mission_records(mid)}
+        if to not in recs:
+            sys.exit(f"{to} isn't on Mission '{missions.info(mid)['name']}'. `spook agents` lists its agents.")
+        g = read_json(missions.mission_dir(mid) / "graph.json", {})
+        if task and task not in {t["id"] for t in g.get("tasks", [])}:
+            sys.exit(f"no task {task} on Mission '{missions.info(mid)['name']}'")
+        messages.add(mid, sender, to, text, task)
+        note = "  (its pane is closed; the human would have to start a new agent)" if recs[to].get("gone") else ""
+        print(f"Queued for {to} on Mission '{missions.info(mid)['name']}'.{note}")
+        log(f"message {sender} -> {to} on {mid}" + (f" about {task}" if task else ""))
+    print(f"{to} hasn't seen it yet: the human sees it on the board and delivers it when ready "
+          f"(typed into {to}'s input, not sent). Don't wait on a reply in this turn.")
+
+
+def cmd_agents(argv: list[str]) -> None:
+    mids, me = _target_missions(argv)
+    for mid in mids:
+        print(f"# {missions.info(mid)['name']} ({mid})")
+        for r in mission_records(mid):
+            rec = r.get("record") or {}
+            state = "closed" if r.get("gone") else (r.get("agent_status") or "?")
+            you = "  (you)" if r["alias"] == me else ""
+            print(f"{r['alias']:>4}  {state:<8} {r.get('workspace', ''):<20} {rec.get('title', '')}{you}")
+
+
 def cmd_install_cli() -> None:
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     target = os.path.expanduser("~/.local/bin/spook")
@@ -327,6 +375,10 @@ def main(argv: list[str]) -> None:
         cmd_mission(argv[1:])
     elif cmd == "task":
         cmd_task(argv[1:])
+    elif cmd == "tell":
+        cmd_tell(argv[1:])
+    elif cmd == "agents":
+        cmd_agents(argv[1:])
     elif cmd == "install-cli":
         cmd_install_cli()
     elif cmd == "open":

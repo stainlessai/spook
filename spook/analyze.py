@@ -141,7 +141,7 @@ another agent probably doesn't know about, and agents blocked on each other.
 - An agent with `launched_for_task` was started by the human specifically for that task id: \
 make it an owner of that task (keep the id) unless its record clearly shows it went elsewhere.
 - Never create a task whose subject is the board itself: adding a task to it (e.g. `spook task add`), \
-closing, reopening or updating another task, \
+leaving a message for another agent (`spook tell`), closing, reopening or updating another task, \
 or telling an agent about a task's status. Apply it to the task it concerns (status, plus a note in \
 its detail such as "closed by A5; A1 notified").
 - Tasks in "Trash" were removed from the board by the human. Do not output them and do not recreate \

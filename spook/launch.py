@@ -12,7 +12,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import herdr, missions, notes
+from . import herdr, messages, missions, notes
 from .paths import read_json, state_dir, write_json
 from .transcript import find_transcript
 from .worker import mission_records
@@ -252,31 +252,37 @@ def point_at_task(record: dict, task: dict, owned: list[dict], graph: dict, forc
     if others:
         prompt += " I've also added notes on " + " and ".join(
             f"{t['id']} ({write_brief(t, graph)})" for t in others) + "."
+    inbox = messages.pending(to=record["alias"])
+    prompt += messages.as_prompt(inbox)
     herdr.call("pane", "send-text", pane_id, prompt)
     notes.mark_delivered(pane_id, list(pending))
+    messages.mark_delivered([m["id"] for m in inbox])
     typed[pane_id] = {"task_id": task["id"], "transcript_size": size, "at": time.time()}
     write_json(typed_path, typed)
     return "typed"
 
 
-def deliver_notes(pane_id: str, tasks: list[dict], graph: dict) -> str:
-    """Point an existing agent at refreshed briefs that hold notes it hasn't seen.
-
-    Types a prompt into its input box without sending it, and only when the agent
-    is idle, so nothing lands in a running turn or a dialog. Returns what happened.
-    """
+def deliver_pending(record: dict, tasks: list[dict], graph: dict) -> str:
+    """Type a prompt into an existing agent pointing it at notes it hasn't seen (via
+    refreshed briefs) and at messages other agents left for it. Only when there is
+    something to deliver and the agent is idle; never sent. Returns what happened:
+    "none", "typed" or "busy:<status>"."""
+    pane_id = record["pane_id"]
     pending = notes.undelivered(pane_id, [t["id"] for t in tasks])
-    if not pending:
+    inbox = messages.pending(to=record["alias"])
+    if not pending and not inbox:
         return "none"
     status = herdr.call("agent", "get", pane_id).get("agent", {}).get("agent_status")
     if status not in ("idle", "done"):
         return f"busy:{status}"
-    briefs = [str(write_brief(t, graph)) for t in tasks if t["id"] in pending]
-    what = ", ".join(f"{tid} ({n} new note{'s' * (n > 1)})" for tid, n in pending.items())
-    prompt = (
-        f"I've added notes on {what} in spook. Read the 'Notes from the human' section of "
-        f"{' and '.join(briefs)} and take them into account."
-    )
+    prompt = ""
+    if pending:
+        briefs = [str(write_brief(t, graph)) for t in tasks if t["id"] in pending]
+        what = ", ".join(f"{tid} ({n} new note{'s' * (n > 1)})" for tid, n in pending.items())
+        prompt = (f"I've added notes on {what} in spook. Read the 'Notes from the human' section of "
+                  f"{' and '.join(briefs)} and take them into account.")
+    prompt = (prompt + messages.as_prompt(inbox)).strip()
     herdr.call("pane", "send-text", pane_id, prompt)
     notes.mark_delivered(pane_id, list(pending))
+    messages.mark_delivered([m["id"] for m in inbox])
     return "typed"

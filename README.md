@@ -115,7 +115,7 @@ herdr server reload-config
 | `f` | Show only the tasks with one of your tags, or untagged ones (`f` again to change or clear) |
 | `x` | Hide the selected completed task (on a hidden one: unhide it) |
 | `d` | Show or hide hidden tasks |
-| `t` | Move the selected task to the Trash tab |
+| `t` | Move the selected task to the Trash tab (on a message waiting for delivery: discard it) |
 | `u` | Trash tab: restore the selected task to the board |
 | `X` | Trash tab: delete the selected task permanently (asks first) |
 
@@ -267,8 +267,28 @@ part of your current task (often in another project), add it with
 instead of only mentioning it. When you finish a task on the board, run
 `spook task done ID`; when a task's status, dependencies or owners change,
 update it with `spook task update ID --status blocked --add-depends T5 ...`.
-`spook task list` shows the current tasks.
+`spook task list` shows the current tasks. Other agents aren't told about
+any of this; if one needs to know something, leave it a message with
+`spook tell A4 "..." [--task T7]` (`spook agents` lists them). The human
+delivers it, so don't wait for a reply in the same turn.
 ```
+
+### Messages between agents
+
+Spook never sends anything to an agent by itself, so an agent that needs
+another one to know something leaves a message:
+
+```sh
+spook agents                                   # who's on the Mission
+spook tell A4 "Is port 80 still needed on the ALB?" --task T32
+```
+
+The message waits on the board under **Messages to deliver**, with ✉ counts
+on the recipient (Agents tab) and on the task. Press `g` on the message, or on
+the recipient, and spook types it into that agent's input box along with
+anything else it hasn't seen. It's typed, not sent: you read it and press
+Enter. `t` on a message discards it. Messages are one line each and, like
+notes, never given to spook's models.
 
 ### Starting an agent for an unowned task
 
@@ -365,6 +385,7 @@ Per Mission, in `missions/<id>/`:
 | `hidden_tasks.json` | Completed tasks you hid with `x` |
 | `added_tasks.json` | Tasks added with `spook task add` (kept by the model) |
 | `task_tags.json` | Your tags on tasks (`#`) |
+| `messages.json` | Messages agents left for each other with `spook tell`, and when you delivered them |
 | `task_edits.json` | Task fields set with `spook task update` (kept by the model until released) |
 | `trash.json` | Trashed tasks, with a snapshot of each |
 | `status_overrides.json` | Statuses set by hand: by you with `c`, or by an agent with `spook task done/reopen` |
