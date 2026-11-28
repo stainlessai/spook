@@ -509,13 +509,18 @@ class Board(App):
     AUTO_FOCUS = "#tree"
     CSS = """
     #status { height: auto; padding: 0 1; background: $boost; }
+    /* Take what's left under the status line; otherwise the screen scrolls it out of view. */
+    TabbedContent { height: 1fr; }
     #keys { dock: bottom; height: 1; padding: 0 1; background: $boost; color: $text-muted; }
     #help_box { padding: 0 1; }
     /* Pin the Help tab to the right end of the tab bar. */
     #--content-tab-tab_help { dock: right; }
     #tree, #agents { width: 50%; }
     #act_head { height: auto; padding: 0 1; color: $text-muted; border-bottom: solid $primary-darken-2; }
-    #calls, #trash, #missions { width: 50%; }
+    #calls, #trash, #missions, #msgs { width: 50%; }
+    #msg_box { width: 50%; border-left: solid $primary-darken-2; padding: 0 1; }
+    .narrow #msgs { width: 100%; height: 50%; }
+    .narrow #msg_box { width: 100%; height: 50%; border-left: none; border-top: solid $primary-darken-2; }
     #mission_box { width: 50%; border-left: solid $primary-darken-2; padding: 0 1; }
     .narrow #missions { width: 100%; height: 40%; }
     .narrow #mission_box { width: 100%; height: 60%; border-left: none; border-top: solid $primary-darken-2; }
@@ -590,10 +595,14 @@ class Board(App):
              "The status line shows the filter; f again to change or clear it."),
             ("x", "Hide", "Hide a completed task from the board (display only)."),
             ("d", "Show hidden", "Show or hide the tasks you hid."),
-            ("t", "Trash", "Move any task to the Trash tab. The model is told not to recreate it. "
-             "On a message under 'Messages to deliver', discards it."),
-            ("g on a message", "Deliver", "Messages agents left with `spook tell` wait under 'Messages to "
-             "deliver'. g types them into the recipient's input box (not sent) for you to review and send."),
+            ("t", "Trash", "Move any task to the Trash tab. The model is told not to recreate it."),
+        ]),
+        ("Messages", [
+            ("↑ ↓", "Inspect", "Messages agents left for each other with `spook tell`. Waiting ones (✉) "
+             "come first; delivered ones (✓) below them."),
+            ("g", "Deliver", "Type the selected message, with anything else waiting for that agent, into its "
+             "input box. Not sent: review it there and press Enter. Only when the agent is idle."),
+            ("t", "Discard", "Drop the selected message without delivering it (or clear a delivered one)."),
         ]),
         ("Agents", [
             ("g", "Jump to agent", "Focus the selected agent's pane, pointing it at notes it hasn't seen "
@@ -637,6 +646,11 @@ class Board(App):
                     yield Tree("tasks", id="tree")
                     with VerticalScroll(id="detail_box"):
                         yield Markdown(id="detail")
+            with TabPane("Messages", id="tab_messages"):
+                with Horizontal(classes="split"):
+                    yield DataTable(id="msgs", cursor_type="row")
+                    with VerticalScroll(id="msg_box"):
+                        yield Markdown(id="msg_detail")
             with TabPane("Agents", id="tab_agents"):
                 with Horizontal(classes="split"):
                     yield DataTable(id="agents", cursor_type="row")
@@ -666,6 +680,8 @@ class Board(App):
         t.add_columns("id", "workspace", "status", "phase", "about")
         self.query_one("#calls", DataTable).add_columns("", "started", "what", "model", "time", "cost")
         self.query_one("#trash", DataTable).add_columns("id", "status", "title", "trashed")
+        self.query_one("#msgs", DataTable).add_columns("", "from", "to", "task", "left", "message")
+        self.all_msgs: list[dict] = []
         self.query_one("#missions", DataTable).add_columns("", "Mission", "agents", "open", "alerts", "updated")
         self._missions_sig = None
         self.trash: dict = {}
@@ -706,7 +722,8 @@ class Board(App):
         return "\n".join(out)
 
     FOCUS_IN_TAB = {"tab_missions": "#missions", "tab_tasks": "#tree", "tab_agents": "#agents", "tab_activity": "#calls",
-                    "tab_trash": "#trash", "tab_help": "#help_box"}
+                    "tab_trash": "#trash", "tab_help": "#help_box",
+                    "tab_messages": "#msgs"}
 
     def _switch_tab(self, tab: str) -> None:
         # Move focus into the new tab first: if focus stays on a widget in the old tab,
@@ -757,11 +774,13 @@ class Board(App):
             self.added = load_added()
             self.edits = load_edits()
             self.task_tags = tags.load()
-            self.inbox = messages.pending()
+            self.all_msgs = messages.load()
+            self.inbox = [m for m in self.all_msgs if not m.get("delivered_at")]
             self.task_notes = notes.load()
             self.trash = load_trash()
             self._render_tree()
             self._render_trash()
+            self._render_messages()
         all_m = list(missions.all_missions())
         msig = self._mtimes([d / "missions.json"] + [state_dir() / "missions" / m / f
                                                      for m in all_m for f in ("graph.json", "agents.json")])
@@ -918,15 +937,6 @@ class Board(App):
             for i, a in sorted(alerts, key=lambda x: order.get(x[1]["severity"], 3)):
                 icon, style = SEV.get(a["severity"], ("?", ""))
                 an.add_leaf(Text.assemble((f"{icon} ", style), a["text"]), data=("alert", i))
-
-        inbox = getattr(self, "inbox", [])
-        if inbox:
-            mn = tree.root.add(Text(f"Messages to deliver ({len(inbox)})", style="bold sky_blue1"),
-                               data=("messages", None), expand=True)
-            for m in inbox:
-                about = f" (re {m['task']})" if m.get("task") else ""
-                mn.add_leaf(Text.assemble((f"✉ {m['from']} → {m['to']}{about}: ", "sky_blue1"), m["text"]),
-                            data=("msg", m["id"]))
 
         concerns = {c["id"]: c for c in g.get("concerns", [])}
         departed = [t for t in tasks if t.get("departed")]
@@ -1134,18 +1144,6 @@ class Board(App):
                 if tid in by_id:
                     lines.append(f"- **{tid}**: {by_id[tid]['title']} ({by_id[tid]['status']})")
             md.update("\n".join(lines))
-        elif kind == "msg":
-            m = next((x for x in getattr(self, "inbox", []) if x["id"] == key), None)
-            if m:
-                about = f" about **{m['task']}**: {by_id[m['task']]['title']}" if m.get("task") in by_id else ""
-                md.update("\n".join([
-                    f"## Message from {self._owner_label(m['from'])} to {self._owner_label(m['to'])}",
-                    f"Left {_ago(m['at'])}{about}", "", m["text"], "",
-                    f"_Not delivered yet. g: type it into {m['to']}'s input (not sent) · t: discard it_",
-                ]))
-        elif kind == "messages":
-            md.update("## Messages to deliver\n\nAgents left these with `spook tell`. Spook doesn't send them: "
-                      "g on a message (or on the agent) types it into the recipient's input box for you to send.")
         elif kind == "tag":
             task_tags = getattr(self, "task_tags", {})
             ts = [t for t in g.get("tasks", []) if (key in task_tags.get(t["id"], []) if key else not task_tags.get(t["id"]))]
@@ -1223,6 +1221,9 @@ class Board(App):
         return "\n".join(out)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.data_table.id == "msgs":
+            self._show_message(event.row_key.value if event.row_key else None)
+            return
         if event.data_table.id == "missions":
             self._show_mission(event.row_key.value if event.row_key else None)
             return
@@ -1437,6 +1438,52 @@ class Board(App):
                 "_Trash is empty. Press t on a task to move it here._"
             )
 
+    def _render_messages(self) -> None:
+        table = self.query_one("#msgs", DataTable)
+        keep = table.cursor_row
+        table.clear()
+        # Waiting ones first (oldest first), then the delivered history (newest first).
+        waiting = [m for m in self.all_msgs if not m.get("delivered_at")]
+        done = sorted((m for m in self.all_msgs if m.get("delivered_at")), key=lambda m: -m["delivered_at"])[:50]
+        for m in waiting + done:
+            dim = "grey50" if m.get("delivered_at") else ""
+            table.add_row(Text("✓" if m.get("delivered_at") else "✉", style="green3" if dim else "bold sky_blue1"),
+                          Text(m["from"], style=dim), Text(m["to"], style=dim), Text(m.get("task") or "", style=dim),
+                          Text(_ago(m["at"]), style=dim), Text(m["text"][:80], style=dim), key=m["id"])
+        tab = self.query_one(TabbedContent).get_tab("tab_messages")
+        tab.label = f"Messages ({len(waiting)})" if waiting else "Messages"
+        if table.row_count:
+            table.move_cursor(row=min(keep, table.row_count - 1))
+        else:
+            self.query_one("#msg_detail", Markdown).update(
+                "_No messages. Agents leave them for each other with `spook tell A4 \"...\"`; "
+                "they wait here until you deliver them._")
+
+    def _msg_cursor(self) -> dict | None:
+        table = self.query_one("#msgs", DataTable)
+        if self.query_one(TabbedContent).active != "tab_messages" or not table.row_count:
+            return None
+        mid = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        return next((m for m in self.all_msgs if m["id"] == mid), None)
+
+    def _show_message(self, msg_id: str | None) -> None:
+        m = next((x for x in self.all_msgs if x["id"] == msg_id), None)
+        md = self.query_one("#msg_detail", Markdown)
+        if not m:
+            md.update("")
+            return
+        by_id = {t["id"]: t for t in self.graph.get("tasks", [])}
+        about = f" about **{m['task']}**: {by_id[m['task']]['title']}" if m.get("task") in by_id else \
+            (f" about {m['task']}" if m.get("task") else "")
+        if m.get("delivered_at"):
+            foot = f"_Delivered {_ago(m['delivered_at'])} (typed into {m['to']}). t: remove from the list_"
+        else:
+            foot = f"_Not delivered yet. g: type it into {m['to']}'s input, with anything else waiting for it (not sent) · t: discard_"
+        md.update("\n".join([
+            f"## {self._owner_label(m['from'])} → {self._owner_label(m['to'])}",
+            f"Left {_ago(m['at'])}{about}", "", m["text"], "", foot,
+        ]))
+
     def _trash_cursor(self) -> str | None:
         table = self.query_one("#trash", DataTable)
         if self.query_one(TabbedContent).active != "tab_trash" or not table.row_count:
@@ -1444,15 +1491,16 @@ class Board(App):
         return table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
 
     def action_trash_task(self) -> None:
+        if self.query_one(TabbedContent).active == "tab_messages":
+            m = self._msg_cursor()
+            if m:
+                messages.discard(m["id"])
+                self.notify("Message discarded" if not m.get("delivered_at") else "Message removed")
+                self.poll()
+            return
         if self.query_one(TabbedContent).active != "tab_tasks":
             return
         key = self._current_key()
-        if key and key[0] == "msg":
-            self.query_one(Tree).action_cursor_down()
-            messages.discard(key[1])
-            self.notify("Message discarded")
-            self.poll()
-            return
         if not key or key[0] != "task":
             self.notify("Select a task first", severity="warning")
             return
@@ -1524,9 +1572,14 @@ class Board(App):
             table = self.query_one("#agents", DataTable)
             if table.row_count:
                 alias = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
-        elif (self._current_key() or ("",))[0] == "msg":
-            m = next((x for x in getattr(self, "inbox", []) if x["id"] == self._current_key()[1]), None)
-            alias = m["to"] if m else None
+        elif self.query_one(TabbedContent).active == "tab_messages":
+            m = self._msg_cursor()
+            if not m:
+                return
+            if m.get("delivered_at"):
+                self.notify(f"Already delivered {_ago(m['delivered_at'])}.")
+                return
+            alias = m["to"]
             on_agents = True  # Deliver what's waiting for that agent; no task prompt.
         else:
             t = self._selected_task()

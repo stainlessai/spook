@@ -115,7 +115,7 @@ herdr server reload-config
 | `f` | Show only the tasks with one of your tags, or untagged ones (`f` again to change or clear) |
 | `x` | Hide the selected completed task (on a hidden one: unhide it) |
 | `d` | Show or hide hidden tasks |
-| `t` | Move the selected task to the Trash tab (on a message waiting for delivery: discard it) |
+| `t` | Move the selected task to the Trash tab (on the Messages tab: discard the message) |
 | `u` | Trash tab: restore the selected task to the board |
 | `X` | Trash tab: delete the selected task permanently (asks first) |
 
@@ -283,11 +283,12 @@ spook agents                                   # who's on the Mission
 spook tell A4 "Is port 80 still needed on the ALB?" --task T32
 ```
 
-The message waits on the board under **Messages to deliver**, with ✉ counts
-on the recipient (Agents tab) and on the task. Press `g` on the message, or on
-the recipient, and spook types it into that agent's input box along with
-anything else it hasn't seen. It's typed, not sent: you read it and press
-Enter. `t` on a message discards it. Messages are one line each and, like
+The message waits in the **Messages** tab (its label shows how many are
+waiting), with ✉ counts on the recipient in the Agents tab and on the task.
+Press `g` on the message, or on the recipient, and spook types it into that
+agent's input box along with anything else it hasn't seen. It's typed, not
+sent: you read it and press Enter. Delivered messages stay in the tab, marked
+✓. `t` on a message discards it. Messages are one line each and, like
 notes, never given to spook's models.
 
 ### Starting an agent for an unowned task
