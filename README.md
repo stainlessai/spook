@@ -213,6 +213,8 @@ Agents can put a task on the board themselves, so you can just tell one
 ```sh
 spook task add "Rotate the staging keys" --depends T3 --concern billing-api --detail "after the cutover"
 spook task done T7                      # mark it done (spook task reopen T7 to undo)
+spook task update T7 --status blocked --add-depends T12 --owners A3
+spook task update T7 --release status   # hand a field back to the model
 spook task list                         # ids, statuses, owners, dependencies
 ```
 
@@ -229,6 +231,12 @@ spook task list                         # ids, statuses, owners, dependencies
   Missions. They count like your own `c`: the model keeps the status and
   raises an alert if later work contradicts it. The board shows who set it,
   and `c` on the board overrides an agent's choice.
+- `spook task update ID` sets any of `--title`, `--detail`, `--status`,
+  `--concern`, `--owners` and the dependencies (`--depends` replaces them,
+  `--add-depends` and `--remove-depends` adjust them). Like a manual status,
+  the model keeps what was set, and the task's details on the board say who
+  set it. `--release title,depends,...` hands fields back to the model.
+  Unknown task or agent ids are ignored, with a warning.
 
 `spook install-cli` writes a small `spook` command to `~/.local/bin` so agents
 can run it from any directory. To tell agents about it, add something like
@@ -240,7 +248,9 @@ This work is tracked on a spook board. When something needs doing that isn't
 part of your current task (often in another project), add it with
 `spook task add "TITLE" [--depends T3,T4] [--concern NAME] [--detail TEXT]`
 instead of only mentioning it. When you finish a task on the board, run
-`spook task done ID`. `spook task list` shows the current tasks.
+`spook task done ID`; when a task's status, dependencies or owners change,
+update it with `spook task update ID --status blocked --add-depends T5 ...`.
+`spook task list` shows the current tasks.
 ```
 
 ### Starting an agent for an unowned task
@@ -337,6 +347,7 @@ Per Mission, in `missions/<id>/`:
 | `graph.json` | Concerns, tasks, alerts |
 | `hidden_tasks.json` | Completed tasks you hid with `x` |
 | `added_tasks.json` | Tasks added with `spook task add` (kept by the model) |
+| `task_edits.json` | Task fields set with `spook task update` (kept by the model until released) |
 | `trash.json` | Trashed tasks, with a snapshot of each |
 | `status_overrides.json` | Statuses set by hand: by you with `c`, or by an agent with `spook task done/reopen` |
 | `task_notes.json` | Your private notes on tasks |

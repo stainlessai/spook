@@ -286,6 +286,58 @@ def _next_task_id(d, graph: dict) -> str:
     return f"T{max(nums, default=0) + 1}"
 
 
+def _concern_id(g: dict, concern: str) -> str:
+    """The id of the concern with this name or id, creating it if there's none."""
+    g.setdefault("concerns", [])
+    c = next((c for c in g["concerns"] if concern.lower() in (c["id"].lower(), c["name"].lower())), None)
+    if c:
+        return c["id"]
+    cid = f"C{max([int(c['id'][1:]) for c in g['concerns'] if c['id'][1:].isdigit()], default=0) + 1}"
+    g["concerns"].append({"id": cid, "name": concern, "description": "", "crosscutting": False})
+    return cid
+
+
+EDITABLE = ("title", "detail", "concern", "owners", "depends_on")
+
+
+def load_edits(mission: str | None = None) -> dict[str, dict]:
+    """task id -> {field: {"value", "by", "at"}}: fields set explicitly with
+    `spook task update`. They win over the model until released."""
+    return read_json(_md(mission) / "task_edits.json", {})
+
+
+def _apply_edits(tasks: list[dict], g: dict, edits: dict) -> None:
+    for t in tasks:
+        for field, e in edits.get(t["id"], {}).items():
+            if field == "concern":
+                t["concern_id"] = _concern_id(g, e["value"])
+            else:
+                t[field] = e["value"]
+
+
+def update_task(mission: str, task_id: str, changes: dict, release: list[str], by: str | None) -> dict | None:
+    """Set fields on a task (and keep them through rebuilds), or hand them back to the
+    model (release). changes: field -> value, fields from EDITABLE. Returns the task."""
+    d = _md(mission)
+    with file_lock(d / "graph.lock"):
+        g = read_json(d / "graph.json", {})
+        task = next((t for t in g.get("tasks", []) if t["id"] == task_id), None)
+        if not task:
+            return None
+        edits = load_edits(mission)
+        mine = edits.setdefault(task_id, {})
+        for f in release:
+            mine.pop(f, None)
+        for f, v in changes.items():
+            mine[f] = {"value": v, "by": by, "at": time.time()}
+        if not mine:
+            edits.pop(task_id)
+        _apply_edits([task], g, {task_id: {f: mine[f] for f in changes}})
+        write_json(d / "task_edits.json", edits)
+        write_json(d / "graph.json", g)
+        return task
+
+
 def add_task(mission: str, title: str, detail: str = "", depends_on: list[str] | None = None,
              concern: str | None = None, added_by: str = "cli") -> tuple[str, list[str]]:
     """Put a task on a Mission's board now. Returns (task id, unknown dependency ids)."""
@@ -299,14 +351,7 @@ def add_task(mission: str, title: str, detail: str = "", depends_on: list[str] |
         deps = list(dict.fromkeys(depends_on or []))
         unknown = [x for x in deps if x not in ids]
         deps = [x for x in deps if x in ids]  # A typo would otherwise stick to the task for good.
-        cid = "_"
-        if concern:
-            c = next((c for c in g["concerns"] if concern.lower() in (c["id"].lower(), c["name"].lower())), None)
-            if c:
-                cid = c["id"]
-            else:
-                cid = f"C{max([int(c['id'][1:]) for c in g['concerns'] if c['id'][1:].isdigit()], default=0) + 1}"
-                g["concerns"].append({"id": cid, "name": concern, "description": "", "crosscutting": False})
+        cid = _concern_id(g, concern) if concern else "_"
         tid = _next_task_id(d, g)
         g["tasks"].append({
             "id": tid, "title": title, "status": "open", "concern_id": cid, "projects": [],
@@ -336,6 +381,17 @@ def set_task_status(task_id: str, status: str, mission: str, by: str) -> str | N
         write_json(d / "status_overrides.json", ov)
         write_json(d / "graph.json", g)
         return prev
+
+
+def release_status(task_id: str, mission: str) -> bool:
+    """Hand a task's status back to the model."""
+    d = _md(mission)
+    with file_lock(d / "graph.lock"):
+        ov = load_overrides(mission)
+        if ov.pop(task_id, None) is None:
+            return False
+        write_json(d / "status_overrides.json", ov)
+        return True
 
 
 def board_panes() -> set[str]:
@@ -455,9 +511,12 @@ def rebuild_graph(mission: str | None = None, force: bool = False) -> None:
     reserved = sorted({t["id"] for t in departed})
     added_in = [{"id": tid, "title": a["title"], "detail": a.get("detail", ""), "depends_on": a.get("depends_on", []),
                  "added_by": a.get("added_by")} for tid, a in load_added(mid).items() if tid not in reserved]
+    edits_in = [{"id": tid, **{f: e["value"] for f, e in fields.items()},
+                 "set_by": sorted({e.get("by") or "the human" for e in fields.values()})}
+                for tid, fields in load_edits(mid).items() if tid not in reserved]
     started = time.time()
     graph = update_graph(agents_in, previous, trashed, overrides, info.get("scope", ""), reserved,
-                         f"[{info['name']}] task graph from {len(records)} agents", added_in)
+                         f"[{info['name']}] task graph from {len(records)} agents", added_in, edits_in)
     graph.update(fingerprint=fp, updated_at=time.time())
     with file_lock(d / "graph.lock"):
         # The model call takes a while; apply trash/restore done meanwhile.
@@ -505,6 +564,8 @@ def rebuild_graph(mission: str | None = None, force: bool = False) -> None:
                 kept.append(t)
             t["title"] = a["title"]
             t["depends_on"] = list(dict.fromkeys(a.get("depends_on", []) + t.get("depends_on", [])))
+        # Fields set with `spook task update` win too.
+        _apply_edits(kept, graph, load_edits(mid))
         # The human's status decisions win; the model flags conflicts as alerts instead.
         ov = load_overrides(mid)
         for t in kept:

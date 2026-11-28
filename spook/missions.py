@@ -70,7 +70,12 @@ def _renumber(reg: dict) -> dict:
         if old == mid:
             continue
         src, dst = root / old, root / mid
-        if src.exists() and not src.is_symlink() and not dst.exists():
+        if old.lower() == mid.lower():  # Only the case differs (same folder on macOS).
+            if src.exists():
+                tmp = root / f".renaming-{old}"
+                src.rename(tmp)
+                tmp.rename(dst)
+        elif src.exists() and not src.is_symlink() and not dst.exists():
             shutil.move(str(src), str(dst))
             os.symlink(mid, src)
         log(f"mission id {old} -> {mid}")

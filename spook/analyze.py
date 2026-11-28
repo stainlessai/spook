@@ -154,6 +154,8 @@ change the status; raise a warn alert naming the task and the agent instead.
 every one with its id and title unchanged. You may set its concern, owners, status and further \
 dependencies from the records, and merge other agents' matching work into it rather than \
 creating a duplicate.
+- "Task fields set explicitly" were set by the human or an agent with `spook task update`. Keep \
+each listed field at that value (`concern` is a concern name). Other fields of those tasks are yours.
 - Reuse previous task and concern ids for the same work, and never reuse a trashed task's id. \
 Only claim what the records support."""
 
@@ -231,7 +233,7 @@ def update_agent_record(previous: dict | None, meta: dict, digest: str, first_as
 
 def update_graph(agent_records: list[dict], previous: dict | None, trashed: list[dict],
                  overrides: list[dict], scope: str, reserved_ids: list[str], label: str,
-                 added: list[dict] | None = None) -> dict:
+                 added: list[dict] | None = None, edits: list[dict] | None = None) -> dict:
     prompt = "\n\n".join([
         "# Mission scope",
         scope.strip() or "(none: include all of the agents' work)",
@@ -245,6 +247,8 @@ def update_graph(agent_records: list[dict], previous: dict | None, trashed: list
         json.dumps(overrides, indent=2) if overrides else "(none)",
         "# Tasks added explicitly (keep every one)",
         json.dumps(added, indent=2) if added else "(none)",
+        "# Task fields set explicitly (keep these values)",
+        json.dumps(edits, indent=2) if edits else "(none)",
         "# Reserved task ids (in use elsewhere on this Mission; never output or reuse)",
         ", ".join(reserved_ids) if reserved_ids else "(none)",
     ])

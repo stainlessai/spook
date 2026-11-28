@@ -21,7 +21,7 @@ from textual.widgets import (
 from . import activity, herdr, launch, missions, notes
 from .paths import read_json, state_dir, write_json
 from .worker import (
-    delete_forever, live_agents, load_added, load_overrides, load_trash, mission_records, restore_task,
+    delete_forever, live_agents, load_added, load_edits, load_overrides, load_trash, mission_records, restore_task,
     toggle_done, trash_task,
 )
 
@@ -589,12 +589,13 @@ class Board(App):
             self._render_agents()
         sig = self._mtimes([d / "missions.json", md / "graph.json", md / "agents.json", md / "trash.json",
                             md / "status_overrides.json", md / "task_notes.json", md / "hidden_tasks.json",
-                            md / "added_tasks.json"])
+                            md / "added_tasks.json", md / "task_edits.json"])
         if sig != self._sig:
             self._sig = sig
             self.graph = read_json(md / "graph.json", {})
             self.overrides = load_overrides()
             self.added = load_added()
+            self.edits = load_edits()
             self.task_notes = notes.load()
             self.trash = load_trash()
             self._render_tree()
@@ -979,6 +980,12 @@ class Board(App):
                             f"{'done' if ov['status'] == 'done' else 'reopen'}` (c to change)_"]
             else:
                 out += ["", f"_{verb} by you {_ago(ov['at'])} (c to undo)_"]
+        ed = getattr(self, "edits", {}).get(t["id"])
+        if ed:
+            who = sorted({self._owner_label(e["by"]) if e.get("by") else "you" for e in ed.values()})
+            names = ", ".join(f.replace("depends_on", "dependencies") for f in ed)
+            out += ["", f"_{names.capitalize()} set by {', '.join(who)} with `spook task update`; the model "
+                        f"keeps {'it' if len(ed) == 1 else 'them'} (`--release` hands back)._"]
         added = getattr(self, "added", {}).get(t["id"])
         if added:
             out += ["", f"_Added by {self._owner_label(added['added_by']) if added['added_by'] != 'the human' else 'you'} "
