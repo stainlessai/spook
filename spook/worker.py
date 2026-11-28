@@ -243,7 +243,8 @@ def delete_forever(task_id: str, mission: str | None = None) -> bool:
 
 
 def load_overrides(mission: str | None = None) -> dict[str, dict]:
-    """task id -> {"status", "prev", "at"}: statuses the human set by hand."""
+    """task id -> {"status", "prev", "at", "by"?}: statuses set explicitly, by the human
+    with `c` (no "by") or by an agent with `spook task done/reopen` ("by": its alias)."""
     return read_json(_md(mission) / "status_overrides.json", {})
 
 
@@ -258,7 +259,7 @@ def toggle_done(task_id: str, mission: str | None = None) -> str | None:
         ov = load_overrides(mission)
         if task["status"] in ("done", "dropped"):
             mine = ov.get(task_id)
-            if mine and mine["status"] == "done":
+            if mine and mine["status"] == "done" and not mine.get("by"):
                 ov.pop(task_id)  # Undo my own close: back to what it was.
                 task["status"] = mine.get("prev") or "open"
             else:
@@ -317,6 +318,24 @@ def add_task(mission: str, title: str, detail: str = "", depends_on: list[str] |
         write_json(d / "added_tasks.json", added)
         write_json(d / "graph.json", g)
     return tid, unknown
+
+
+def set_task_status(task_id: str, status: str, mission: str, by: str) -> str | None:
+    """An agent marks a task done or reopens it (`spook task done/reopen`). Kept like the
+    human's own decisions. Returns the previous status, or None if there's no such task."""
+    d = _md(mission)
+    with file_lock(d / "graph.lock"):
+        g = read_json(d / "graph.json", {})
+        task = next((t for t in g.get("tasks", []) if t["id"] == task_id), None)
+        if not task:
+            return None
+        prev = task["status"]
+        ov = load_overrides(mission)
+        ov[task_id] = {"status": status, "prev": prev, "at": time.time(), "by": by}
+        task["status"] = status
+        write_json(d / "status_overrides.json", ov)
+        write_json(d / "graph.json", g)
+        return prev
 
 
 def board_panes() -> set[str]:
@@ -429,7 +448,8 @@ def rebuild_graph(mission: str | None = None, force: bool = False) -> None:
     trashed = [{"id": tid, "title": e["task"]["title"], "status": e["task"]["status"]}
                for tid, e in load_trash(mid).items()]
     overrides = [
-        {"id": tid, "status": o["status"], "set_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(o["at"]))}
+        {"id": tid, "status": o["status"], "set_by": o.get("by") or "the human",
+         "set_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(o["at"]))}
         for tid, o in load_overrides(mid).items()
     ]
     reserved = sorted({t["id"] for t in departed})

@@ -4,12 +4,15 @@ An agent (a Claude session) can be on any number of Missions. Agent summaries ar
 shared; each Mission keeps its own graph and the human's decisions about it in
 missions/<id>/.
 
+Mission ids are M1, M2, ... in creation order, never reused (missions.json keeps the counter).
+
 missions.json:  {"active": id, "missions": {id: {"name", "scope", "created_at"}}}
 missions/<id>/agents.json:  {session_id: {"pane_id", "workspace", "title", "added_at"}}
 """
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import time
@@ -32,12 +35,55 @@ def _lock():
     return file_lock(state_dir() / "missions.lock")
 
 
+ID_RE = re.compile(r"^M[1-9]\d*$")
+
+
 def load_registry() -> dict:
     reg = read_json(_registry_path(), None)
-    if reg is None:
+    if reg is None or "next_id" not in reg:
         with file_lock(state_dir() / "migrate.lock"):  # Hooks and the board may start together.
             reg = read_json(_registry_path(), None) or migrate_legacy()
+            if "next_id" not in reg:
+                reg = _renumber(reg)
     return reg
+
+
+def _take_id(reg: dict) -> str:
+    """The next Mission id (M1, M2, ...). Ids are never reused, even after a delete."""
+    n = reg.get("next_id", 1)
+    reg["next_id"] = n + 1
+    return f"M{n}"
+
+
+def _renumber(reg: dict) -> dict:
+    """Give Missions from before sequential ids M1, M2, ... in creation order. Each old
+    folder name stays as a link, so brief paths already handed to agents keep working."""
+    root = state_dir() / "missions"
+    old_missions = reg["missions"]
+    order = sorted(old_missions, key=lambda m: old_missions[m].get("created_at", 0))
+    new = {"active": reg.get("active"), "missions": {}, "next_id": 1}
+    renamed = {}
+    for old in order:
+        mid = _take_id(new)
+        new["missions"][mid] = old_missions[old]
+        renamed[old] = mid
+        if old == mid:
+            continue
+        src, dst = root / old, root / mid
+        if src.exists() and not src.is_symlink() and not dst.exists():
+            shutil.move(str(src), str(dst))
+            os.symlink(mid, src)
+        log(f"mission id {old} -> {mid}")
+    # Links left by an earlier rename point at old folder names: repoint them.
+    if root.exists():
+        for p in root.iterdir():
+            if p.is_symlink() and os.readlink(p) in renamed and p.name not in renamed.values():
+                target = renamed[os.readlink(p)]
+                p.unlink()
+                os.symlink(target, p)
+    new["active"] = renamed.get(new["active"], next(iter(new["missions"]), None))
+    _save_registry(new)
+    return new
 
 
 def _save_registry(reg: dict) -> None:
@@ -64,21 +110,11 @@ def mission_dir(mission: str | None = None) -> Path:
     return d
 
 
-def _slug(name: str) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "mission"
-    taken = set(all_missions())
-    out, n = s, 2
-    while out in taken or out == "_deleted":
-        out, n = f"{s}-{n}", n + 1
-    return out
-
-
-def find(name_or_id: str) -> str | None:
-    ms = all_missions()
-    if name_or_id in ms:
-        return name_or_id
-    hits = [mid for mid, m in ms.items() if m["name"].lower() == name_or_id.lower()]
-    return hits[0] if len(hits) == 1 else None
+def find(mission_id: str) -> str | None:
+    """The Mission with this id (M1, M2, ...; any case), or None. Names aren't accepted:
+    they can be renamed and needn't be unique."""
+    mid = mission_id.strip().upper()
+    return mid if mid in all_missions() else None
 
 
 def set_active(mission: str) -> None:
@@ -92,7 +128,7 @@ def set_active(mission: str) -> None:
 def create(name: str, scope: str = "") -> str:
     with _lock():
         reg = load_registry()
-        mid = _slug(name)
+        mid = _take_id(reg)
         reg["missions"][mid] = {"name": name.strip(), "scope": scope.strip(), "created_at": time.time()}
         reg["active"] = mid
         _save_registry(reg)
@@ -228,10 +264,13 @@ def follow_sessions(live: list[dict]) -> None:
 # ---------------------------------------------------------------- migration
 
 def migrate_legacy() -> dict:
-    """First run with Missions: turn the old single board into Mission "default"."""
+    """First run with Missions: turn the old single board into Mission "Default"."""
     root = state_dir()
-    reg = {"active": "default", "missions": {"default": {"name": "Default", "scope": "", "created_at": time.time()}}}
-    dest = root / "missions" / "default"
+    reg = {"missions": {}, "next_id": 1}
+    mid = _take_id(reg)
+    reg["active"] = mid
+    reg["missions"][mid] = {"name": "Default", "scope": "", "created_at": time.time()}
+    dest = root / "missions" / mid
     dest.mkdir(parents=True, exist_ok=True)
     moved = []
     for name in PER_MISSION:
@@ -256,5 +295,5 @@ def migrate_legacy() -> dict:
         shutil.move(str(root / "tracked.json"), str(dest / "tracked.legacy.json"))
     write_json(root / "missions.json", reg)
     if moved or seeded:
-        log(f"migrated to Missions: moved {moved}, seeded {len(seeded)} agents into 'default'")
+        log(f"migrated to Missions: moved {moved}, seeded {len(seeded)} agents into Mission 'Default' ({mid})")
     return reg

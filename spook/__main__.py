@@ -2,18 +2,21 @@
 
   hook                 herdr event hook: queue the pane if its agent is on a Mission
   sync                 re-check every agent on a Mission and rebuild graphs
-  track   [opts]       add agents to the active Mission (or --mission NAME)
+  track   [opts]       add agents to the active Mission (or --mission ID)
   untrack [opts]       remove them
                        opts: --pane ID | --workspace ID (default: current workspace)
   mission list
-  mission new NAME [--scope TEXT]
-  mission use NAME
-  mission rename NAME NEW_NAME
-  mission scope NAME TEXT
-  task add TITLE [--detail TEXT] [--depends T3,T4] [--concern NAME] [--mission NAME]
+  mission new NAME [--scope TEXT]   prints the new Mission's id
+  mission use ID
+  mission rename ID NEW_NAME
+  mission scope ID TEXT
+                       Missions are named by id (M1, M2, ...; see `mission list`), never by name.
+  task add TITLE [--detail TEXT] [--depends T3,T4] [--concern NAME] [--mission ID]
                        put a task on the board. Without --mission: every Mission the
                        calling agent's pane is on. The model keeps it (same id and title).
-  task list [--mission NAME]
+  task done TASK [--mission ID]    mark a task done; the model keeps it done
+  task reopen TASK [--mission ID]  reopen a done task
+  task list [--mission ID]
                        the Mission's tasks: id, status, owners, title, dependencies
   install-cli          put a `spook` command in ~/.local/bin so agents can run it
   open                 dock the board on the right of the current tab (or close it)
@@ -29,7 +32,7 @@ import sys
 
 from . import herdr, missions
 from .paths import log, read_json, state_dir
-from .worker import FINISHED, add_task, enqueue, live_agents, rebuild_graph, run_worker
+from .worker import FINISHED, add_task, enqueue, live_agents, rebuild_graph, run_worker, set_task_status
 
 
 def _context() -> dict:
@@ -44,12 +47,17 @@ def _opt(argv: list[str], name: str) -> str | None:
 
 
 def _mission_arg(argv: list[str]) -> str:
-    name = _opt(argv, "--mission")
-    if not name:
+    given = _opt(argv, "--mission")
+    if not given:
         return missions.active()
-    mid = missions.find(name)
+    return _mission_id(given)
+
+
+def _mission_id(given: str) -> str:
+    mid = missions.find(given)
     if not mid:
-        sys.exit(f"no Mission named {name!r}")
+        known = ", ".join(f"{m} ({i['name']})" for m, i in missions.all_missions().items())
+        sys.exit(f"no Mission with id {given!r}. Use an id from `spook mission list`: {known}")
     return mid
 
 
@@ -107,15 +115,13 @@ def cmd_mission(argv: list[str]) -> None:
         act = missions.active()
         for mid, m in missions.all_missions().items():
             n = len(missions.members(mid))
-            print(f"{'*' if mid == act else ' '} {m['name']}  ({mid}, {n} agents)"
+            print(f"{'*' if mid == act else ' '} {mid}  {m['name']}  ({n} agents)"
                   + (f"\n    scope: {m['scope']}" if m.get("scope") else ""))
     elif sub == "new" and len(argv) > 1:
         mid = missions.create(argv[1], _opt(argv, "--scope") or "")
         print(f"Created and switched to Mission '{argv[1]}' ({mid})")
     elif sub in ("use", "rename", "scope") and len(argv) > 1:
-        mid = missions.find(argv[1])
-        if not mid:
-            sys.exit(f"no Mission named {argv[1]!r}")
+        mid = _mission_id(argv[1])
         if sub == "use":
             missions.set_active(mid)
         elif sub == "rename" and len(argv) > 2:
@@ -148,8 +154,8 @@ def _target_missions(argv: list[str]) -> tuple[list[str], str]:
     if hits:
         return hits, alias
     if os.environ.get("HERDR_PANE_ID"):
-        names = ", ".join(m["name"] for m in missions.all_missions().values())
-        sys.exit(f"This pane's agent isn't on a Mission. Pass --mission NAME (one of: {names}).")
+        known = ", ".join(f"{m} ({i['name']})" for m, i in missions.all_missions().items())
+        sys.exit(f"This pane's agent isn't on a Mission. Pass --mission ID (one of: {known}).")
     return [missions.active()], alias
 
 
@@ -168,6 +174,22 @@ def cmd_task(argv: list[str]) -> None:
                 msg += f"  (ignored dependencies not on this board: {', '.join(unknown)})"
             print(msg)
             log(msg)
+    elif sub in ("done", "reopen") and len(argv) > 1 and not argv[1].startswith("--"):
+        tid = argv[1].strip().upper()
+        mids, alias = _target_missions(argv)
+        hits = 0
+        for mid in mids:
+            # Run outside an agent's pane, it's the human's own decision (like c on the board).
+            prev = set_task_status(tid, "done" if sub == "done" else "open", mid,
+                                   None if alias == "the human" else alias)
+            if prev is None:
+                continue
+            hits += 1
+            msg = f"{tid} on Mission '{missions.info(mid)['name']}': {prev} -> {'done' if sub == 'done' else 'open'}"
+            print(msg)
+            log(f"{msg} (by {alias})")
+        if not hits:
+            sys.exit(f"no task {tid} on " + ", ".join(f"'{missions.info(m)['name']}'" for m in mids))
     elif sub == "list":
         mids, _ = _target_missions(argv)
         for mid in mids:
@@ -200,7 +222,7 @@ def cmd_status() -> None:
     for mid, m in missions.all_missions().items():
         g = read_json(missions.mission_dir(mid) / "graph.json", {})
         open_ = len([t for t in g.get("tasks", []) if t["status"] not in ("done", "dropped")])
-        print(f"{'*' if mid == act else ' '} {m['name']}: {len(missions.members(mid))} agents, "
+        print(f"{'*' if mid == act else ' '} {mid} {m['name']}: {len(missions.members(mid))} agents, "
               f"{len(g.get('tasks', []))} tasks ({open_} open), {len(g.get('alerts', []))} alerts")
     print(f"worker: {read_json(state_dir() / 'status.json', {})}")
 

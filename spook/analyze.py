@@ -146,9 +146,10 @@ or telling an agent about a task's status. Apply it to the task it concerns (sta
 its detail such as "closed by A5; A1 notified").
 - Tasks in "Trash" were removed from the board by the human. Do not output them and do not recreate \
 them under another id. Create a new task only for work that is clearly different from them.
-- "Statuses set by the human" are decisions: keep each task at that status. If an agent's record \
-clearly shows new work on such a task after it was set (e.g. work continuing on a task the human \
-closed), do not change the status; raise a warn alert naming the task and the agent instead.
+- "Statuses set explicitly" are decisions, made by the human or by an agent with `spook task done` \
+or `spook task reopen` (see `set_by`): keep each task at that status. If an agent's record clearly \
+shows new work on such a task after it was set (e.g. work continuing on a closed task), do not \
+change the status; raise a warn alert naming the task and the agent instead.
 - "Tasks added explicitly" were put on the board on purpose, by the human or an agent. Output \
 every one with its id and title unchanged. You may set its concern, owners, status and further \
 dependencies from the records, and merge other agents' matching work into it rather than \
@@ -240,7 +241,7 @@ def update_graph(agent_records: list[dict], previous: dict | None, trashed: list
         json.dumps(previous, indent=2) if previous else "(none)",
         "# Trash (removed from the board by the human; do not recreate)",
         json.dumps(trashed, indent=2) if trashed else "(empty)",
-        "# Statuses set by the human (keep these)",
+        "# Statuses set explicitly (keep these)",
         json.dumps(overrides, indent=2) if overrides else "(none)",
         "# Tasks added explicitly (keep every one)",
         json.dumps(added, indent=2) if added else "(none)",

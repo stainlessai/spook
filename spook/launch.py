@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import herdr, missions, notes
 from .paths import read_json, state_dir, write_json
+from .transcript import find_transcript
 from .worker import mission_records
 
 
@@ -212,6 +213,50 @@ def launch(task: dict, directory: str, workspace_id: str | None, prompt: str, pr
     herdr.call("pane", "send-text", pane, one_line)
     notes.mark_delivered(pane, [task["id"]])  # The brief it was pointed at has them.
     return {"pane_id": pane, "workspace_id": workspace_id, "tab_id": tab_id}
+
+
+def _transcript_size(record: dict) -> int:
+    p = record.get("transcript") and Path(record["transcript"])
+    if not p or not p.exists():
+        p = find_transcript(record.get("session_id", ""), record.get("cwd"))
+    return p.stat().st_size if p else -1
+
+
+def point_at_task(record: dict, task: dict, owned: list[dict], graph: dict, force: bool = False) -> str:
+    """Type a prompt into an existing agent's input box pointing it at a task's brief
+    (and at notes it hasn't seen on its other tasks). Never sends it, and only types
+    when the agent is idle. Returns "typed", "already", "pending:<task id>" (a prompt for
+    another task is still sitting there; pass force=True to type anyway) or "busy:<status>"."""
+    pane_id = record["pane_id"]
+    status = herdr.call("agent", "get", pane_id).get("agent", {}).get("agent_status")
+    if status not in ("idle", "done"):
+        return f"busy:{status}"
+    # Pressing g again before the agent has taken a turn would type the prompt twice.
+    typed_path = missions.mission_dir() / "typed_prompts.json"
+    typed = read_json(typed_path, {})
+    size = _transcript_size(record)
+    last = typed.get(pane_id)
+    if last and last.get("transcript_size") == size and size != -1:
+        if last.get("task_id") == task["id"]:
+            return "already"
+        if not force:
+            return f"pending:{last.get('task_id')}"
+    pending = notes.undelivered(pane_id, [t["id"] for t in owned])
+    brief = write_brief(task, graph)
+    prompt = (f"Let's work on spook task {task['id']}: {task['title']}. Read the brief at {brief}: it has "
+              f"the task, what it waits on, what's waiting on it, and what other agents are doing.")
+    if task["id"] in pending:
+        n = pending[task["id"]]
+        prompt += f" It includes {n} new note{'s' * (n > 1)} from me under 'Notes from the human'; follow them."
+    others = [t for t in owned if t["id"] in pending and t["id"] != task["id"]]
+    if others:
+        prompt += " I've also added notes on " + " and ".join(
+            f"{t['id']} ({write_brief(t, graph)})" for t in others) + "."
+    herdr.call("pane", "send-text", pane_id, prompt)
+    notes.mark_delivered(pane_id, list(pending))
+    typed[pane_id] = {"task_id": task["id"], "transcript_size": size, "at": time.time()}
+    write_json(typed_path, typed)
+    return "typed"
 
 
 def deliver_notes(pane_id: str, tasks: list[dict], graph: dict) -> str:

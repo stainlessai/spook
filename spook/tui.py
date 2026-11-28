@@ -428,9 +428,10 @@ class Board(App):
             ("s", "Sort", "Cycle how tasks are grouped: by concern; by status (blocked, unowned, "
              "in progress, waiting on dependencies, open, done, dropped); or as a dependency tree, "
              "each task with the tasks it depends on beneath it."),
-            ("g", "Jump to agent", "Focus the agent that owns the task. If it hasn't seen your latest notes, "
-             "types a prompt pointing it at them (not sent; only when the agent is idle). "
-             "On an unowned task, offers to start one."),
+            ("g", "Jump to agent", "Focus the agent that owns the task and type a prompt pointing it at the "
+             "task's brief, including notes it hasn't seen (typed, not sent; only when the agent is idle, "
+             "and not twice before it takes a turn). On an unowned task, or one whose agent's pane closed, "
+             "offers to start one."),
             ("a", "Start agent", "Start a new Claude agent for the task. Confirm first; the prompt is typed, not sent."),
             ("c", "Done / reopen", "Mark the task done by hand, or reopen a done task. Again to undo. Your call wins over the model."),
             ("n", "Notes", "Add or delete private notes on the task, for agents working on it. "
@@ -713,8 +714,9 @@ class Board(App):
             txt.append("  unowned", style="magenta")
         if t["id"] in self.hidden:
             txt.append("  hidden", style="grey42")
-        if t["id"] in getattr(self, "overrides", {}):
-            txt.append("  (you)", style="grey50 italic")
+        ov = getattr(self, "overrides", {}).get(t["id"])
+        if ov:
+            txt.append(f"  ({ov.get('by') or 'you'})", style="grey50 italic")
         n = len(getattr(self, "task_notes", {}).get(t["id"], []))
         if n:
             txt.append(f"  ✎{n}", style="khaki1")
@@ -972,7 +974,11 @@ class Board(App):
         ov = getattr(self, "overrides", {}).get(t["id"])
         if ov:
             verb = "Marked done" if ov["status"] == "done" else "Reopened"
-            out += ["", f"_{verb} by you {_ago(ov['at'])} (c to undo)_"]
+            if ov.get("by"):
+                out += ["", f"_{verb} by {self._owner_label(ov['by'])} {_ago(ov['at'])} with `spook task "
+                            f"{'done' if ov['status'] == 'done' else 'reopen'}` (c to change)_"]
+            else:
+                out += ["", f"_{verb} by you {_ago(ov['at'])} (c to undo)_"]
         added = getattr(self, "added", {}).get(t["id"])
         if added:
             out += ["", f"_Added by {self._owner_label(added['added_by']) if added['added_by'] != 'the human' else 'you'} "
@@ -1303,16 +1309,27 @@ class Board(App):
             return
         owned = [t for t in self.graph.get("tasks", []) if alias in t.get("owners", [])]
         try:
-            result = launch.deliver_notes(r["pane_id"], owned, self.graph)
+            if task and not on_agents:
+                # A second g on the same task right after a "pending" warning types anyway.
+                again = getattr(self, "_g_warned", None) == (r["pane_id"], task["id"])
+                result = launch.point_at_task(r, task, owned, self.graph, force=again)
+                self._g_warned = (r["pane_id"], task["id"]) if result.startswith("pending:") else None
+            else:
+                result = launch.deliver_notes(r["pane_id"], owned, self.graph)
         except Exception as e:
             result = f"error:{e}"
         if result == "typed":
-            self.notify(f"Typed a prompt into {alias} pointing at your new notes. Review it and press Enter.")
+            what = f"at {task['id']}" if task and not on_agents else "at your new notes"
+            self.notify(f"Typed a prompt into {alias} pointing it {what}. Review it and press Enter.")
+        elif result.startswith("pending:"):
+            self.notify(f"{alias} already has a prompt for {result[8:]} typed and not sent. Send or clear it, "
+                        f"or press g again to type the one for {task['id']} anyway.", severity="warning")
+        elif result == "already":
+            self.notify(f"The prompt for {task['id']} is already typed in {alias}.")
         elif result.startswith("busy:"):
-            self.notify(f"{alias} has notes it hasn't seen but is {result[5:]}; nothing typed. Press g again when it's idle.",
-                        severity="warning")
+            self.notify(f"{alias} is {result[5:]}; nothing typed. Press g again when it's idle.", severity="warning")
         elif result.startswith("error:"):
-            self.notify(f"Couldn't deliver notes: {result[6:]}", severity="error")
+            self.notify(f"Couldn't type the prompt: {result[6:]}", severity="error")
         herdr.focus_pane(r["pane_id"])
         if not os.environ.get("HERDR_PANE_ID"):  # Popup: get out of the way. Docked: stay.
             self.exit()

@@ -106,7 +106,7 @@ herdr server reload-config
 | `delete` | Missions tab: delete the selected Mission (asks first) |
 | `w` | Choose the agents on this Mission (`space` toggles, `s` saves, `esc` cancels) |
 | `r` | Re-analyze every agent on a Mission now |
-| `g` | Jump to the agent behind the selected task or row (on an unowned task, offers to start one) |
+| `g` | Jump to the agent behind the selected task or row, typing (not sending) a prompt that points it at the task (on an unowned task, offers to start one) |
 | `a` | Start an agent for the selected task |
 | `c` | Mark the selected task done by hand, or reopen a done task (again to undo) |
 | `n` | Add or delete private notes on the selected task |
@@ -132,6 +132,12 @@ or "Security review". It holds:
   Missions without mixing them. With no scope, everything is included.
 - **Its own task graph and your decisions:** notes, trash, manual statuses,
   hidden tasks and briefs. They belong to that Mission only.
+
+Each Mission has an id: M1, M2 and so on, in creation order and never reused. The command line always refers to
+Missions by id (`--mission M2`, `mission use M2`), never by name,
+since names can change and needn't be unique. `spook mission list` shows them. Missions created before ids
+looked like this are renamed once, automatically. Their folder keeps a link
+under the old name, so brief paths agents already have still work.
 
 The board shows one Mission at a time. The status line starts with its name.
 The **Missions** tab lists them all, with agents, open tasks, alerts and when
@@ -165,6 +171,9 @@ Your status decisions win. The model is told about them and keeps them. If an
 agent later works on a task you closed, the model raises an alert and leaves
 the status alone. Only you change it back.
 
+Agents can do the same with `spook task done ID` and `spook task reopen ID`
+(see below). Those tasks show the agent's id, e.g. "(A4)", instead of "(you)".
+
 ### Notes for agents
 
 Press `n` on a task to add private notes, e.g. "use the staging bucket, not
@@ -173,11 +182,12 @@ working on the task:
 
 - **Starting an agent with `a`:** the brief includes a "Notes from the human"
   section.
-- **Jumping to an agent with `g`:** if the agent owns tasks with notes it
-  hasn't been pointed at yet, spook refreshes those briefs. It types a one-line
-  prompt into the agent's input box asking it to read them, without sending
-  it. It only types when the agent is idle. If the agent is busy, it says so
-  and types nothing.
+- **Jumping to an agent with `g`:** spook refreshes the task's brief and types
+  a one-line prompt into the agent's input box pointing it at the task, and at
+  any notes it hasn't seen on its tasks, without sending it. It only types when
+  the agent is idle; if the agent is busy, it says so and types nothing.
+  Pressing `g` again before the agent has taken a turn doesn't type it twice.
+  On the Agents tab, `g` only types a prompt when there are unseen notes.
 
 Known gap: switching to an agent's tab yourself doesn't deliver notes. Use `g`.
 
@@ -202,18 +212,23 @@ Agents can put a task on the board themselves, so you can just tell one
 
 ```sh
 spook task add "Rotate the staging keys" --depends T3 --concern billing-api --detail "after the cutover"
+spook task done T7                      # mark it done (spook task reopen T7 to undo)
 spook task list                         # ids, statuses, owners, dependencies
 ```
 
 - Without `--mission`, the task goes on every Mission the calling agent's pane
   is on. Spook knows the pane from herdr's `HERDR_PANE_ID`. From a pane whose
-  agent is on no Mission, it refuses and asks for `--mission NAME`. Outside
+  agent is on no Mission, it refuses and asks for `--mission ID`. Outside
   herdr, it uses the active Mission.
 - The task shows up on the board right away. The model can give it owners, a
   status, a concern and more dependencies, but it can't drop it, rename it or
   remove the dependencies it was added with. Dependency ids that aren't on
   the board are ignored, with a warning.
 - Trash, restore and delete forever work as for any task.
+- `spook task done` and `spook task reopen` work on any task on the agent's
+  Missions. They count like your own `c`: the model keeps the status and
+  raises an alert if later work contradicts it. The board shows who set it,
+  and `c` on the board overrides an agent's choice.
 
 `spook install-cli` writes a small `spook` command to `~/.local/bin` so agents
 can run it from any directory. To tell agents about it, add something like
@@ -224,7 +239,8 @@ this to a `CLAUDE.md` they read:
 This work is tracked on a spook board. When something needs doing that isn't
 part of your current task (often in another project), add it with
 `spook task add "TITLE" [--depends T3,T4] [--concern NAME] [--detail TEXT]`
-instead of only mentioning it. `spook task list` shows the current tasks.
+instead of only mentioning it. When you finish a task on the board, run
+`spook task done ID`. `spook task list` shows the current tasks.
 ```
 
 ### Starting an agent for an unowned task
@@ -260,12 +276,12 @@ From a shell:
 ```sh
 bin/spook status                        # Missions, agents, graph counts, worker state
 bin/spook sync                          # same as r
-bin/spook mission list
-bin/spook mission new "Security review" --scope "audit findings and fixes"
-bin/spook mission use "Security review"
+bin/spook mission list                  # ids, names, agent counts
+bin/spook mission new "Security review" --scope "audit findings and fixes"   # prints its id
+bin/spook mission use M2
 bin/spook track --workspace w3          # add that workspace's agents to the active Mission
-bin/spook track --pane w3:p2 --mission Default
-bin/spook task add "Update the client" --depends T4 --mission Default
+bin/spook track --pane w3:p2 --mission M2
+bin/spook task add "Update the client" --depends T4 --mission M2
 bin/spook install-cli                   # a `spook` command in ~/.local/bin
 ```
 
@@ -322,7 +338,7 @@ Per Mission, in `missions/<id>/`:
 | `hidden_tasks.json` | Completed tasks you hid with `x` |
 | `added_tasks.json` | Tasks added with `spook task add` (kept by the model) |
 | `trash.json` | Trashed tasks, with a snapshot of each |
-| `status_overrides.json` | Statuses you set by hand with `c` |
+| `status_overrides.json` | Statuses set by hand: by you with `c`, or by an agent with `spook task done/reopen` |
 | `task_notes.json` | Your private notes on tasks |
 | `notes_delivered.json` | Which agent pane has been pointed at which notes |
 | `briefs/<task>.md` | Briefs handed to agents |
