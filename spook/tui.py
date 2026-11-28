@@ -21,7 +21,7 @@ from textual.widgets import (
 from . import activity, herdr, launch, messages, missions, notes, tags
 from .paths import read_json, state_dir, write_json
 from .worker import (
-    delete_forever, live_agents, load_added, load_edits, load_overrides, load_trash, mission_records, restore_task,
+    delete_forever, live_agents, load_added, load_edits, load_overrides, load_takeovers, load_trash, mission_records, restore_task,
     toggle_done, trash_task,
 )
 
@@ -767,13 +767,14 @@ class Board(App):
         sig = self._mtimes([d / "missions.json", md / "graph.json", md / "agents.json", md / "trash.json",
                             md / "status_overrides.json", md / "task_notes.json", md / "hidden_tasks.json",
                             md / "added_tasks.json", md / "task_edits.json",
-                            md / "task_tags.json", md / "messages.json"])
+                            md / "task_tags.json", md / "messages.json", md / "takeovers.json"])
         if sig != self._sig:
             self._sig = sig
             self.graph = read_json(md / "graph.json", {})
             self.overrides = load_overrides()
             self.added = load_added()
             self.edits = load_edits()
+            self.takeovers = load_takeovers()
             self.task_tags = tags.load()
             self.all_msgs = messages.load()
             self.inbox = [m for m in self.all_msgs if not m.get("delivered_at")]
@@ -799,7 +800,10 @@ class Board(App):
         n_done = len([x for x in g.get("tasks", []) if x["status"] == "done"])
         n_a = len(g.get("alerts", []))
         name = missions.info()["name"]
-        left = Text.assemble((name, "bold"), f" · {len(self.records)} agents · {n_t} open · {n_done} done · {n_a} alerts")
+        n_closed = len([r for r in self.records.values() if r.get("gone")])
+        left = Text.assemble((name, "bold"), f" · {len(self.records) - n_closed} agents"
+                             + (f" ({n_closed} closed)" if n_closed else "")
+                             + f" · {n_t} open · {n_done} done · {n_a} alerts")
         if self.sort_mode != "concern":
             left.append(f" · by {self.sort_mode}")
         if self.tag_filter is not None:
@@ -1139,10 +1143,15 @@ class Board(App):
         table = self.query_one("#agents", DataTable)
         keep = table.cursor_row
         table.clear()
-        for alias, r in sorted(self.records.items(), key=lambda kv: int(kv[0][1:])):
+        # Open agents first; closed ones (pane gone) after them, greyed out.
+        for alias, r in sorted(self.records.items(), key=lambda kv: (bool(kv[1].get("gone")), int(kv[0][1:]))):
             rec = r["record"]
             n = len([m for m in getattr(self, "inbox", []) if m["to"] == alias])
-            table.add_row(Text.assemble(alias, (f" ✉{n}", "bold sky_blue1") if n else ""), r["workspace"], r.get("agent_status") or "?", rec.get("phase", ""), rec.get("title", ""), key=alias)
+            dim = "grey50" if r.get("gone") else ""
+            table.add_row(Text.assemble((alias, dim), (f" ✉{n}", "bold sky_blue1") if n else ""),
+                          Text(r["workspace"], style=dim),
+                          Text("closed", style="grey50 italic") if r.get("gone") else (r.get("agent_status") or "?"),
+                          Text(rec.get("phase", ""), style=dim), Text(rec.get("title", ""), style=dim), key=alias)
         if table.row_count:
             table.move_cursor(row=min(keep, table.row_count - 1))
 
@@ -1243,6 +1252,11 @@ class Board(App):
                             f"{'done' if ov['status'] == 'done' else 'reopen'}` (c to change)_"]
             else:
                 out += ["", f"_{verb} by you {_ago(ov['at'])} (c to undo)_"]
+        tk = getattr(self, "takeovers", {}).get(t["id"])
+        if tk:
+            src = ", ".join(tk["from"])
+            out += ["", f"_Taken over by {self._owner_label(tk['to'])} from {src} (closed) {_ago(tk['at'])}_"
+                        if tk.get("to") else f"_Unowned since {src} closed ({_ago(tk['at'])})_"]
         ed = getattr(self, "edits", {}).get(t["id"])
         if ed:
             who = sorted({self._owner_label(e["by"]) if e.get("by") else "you" for e in ed.values()})
@@ -1295,7 +1309,8 @@ class Board(App):
         rec = r["record"]
         out = [
             f"## {alias} · {rec.get('title', '')}",
-            f"`{r['cwd']}`  ·  pane {r['pane_id']}  ·  {r.get('agent_status')}  ·  updated {_ago(r.get('updated_at'))}",
+            f"`{r['cwd']}`  ·  pane {r['pane_id']}  ·  {'closed' if r.get('gone') else r.get('agent_status')}"
+            f"  ·  updated {_ago(r.get('updated_at'))}",
             "",
             f"**Goal**: {rec.get('goal', '')}",
             "",

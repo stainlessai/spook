@@ -407,6 +407,94 @@ def live_agents() -> list[dict]:
             if (a.get("agent_session") or {}).get("value") and a["pane_id"] not in panes]
 
 
+def mark_gone(live_all: list[dict] | None = None) -> list[str]:
+    """Flag agents whose session herdr no longer has (pane, tab or workspace closed, or
+    Claude exited). They stay in their Missions' graphs as "closed". Returns the aliases
+    that just closed."""
+    if live_all is None:
+        live_all = live_agents()
+    live_ids = {a["agent_session"]["value"] for a in live_all}
+    closed = []
+    for p in (state_dir() / "agents").glob("*.json"):
+        r = read_json(p, {})
+        gone = r.get("session_id") not in live_ids
+        if r.get("gone") != gone:
+            r["gone"] = gone
+            write_json(p, r)
+            if gone:
+                closed.append(r.get("alias", "?"))
+    return closed
+
+
+def _spook_started_panes() -> set[str]:
+    """Panes of agents spook started for a task (a, or g on an unowned task), on any Mission."""
+    return {p for mid in missions.all_missions() for p in read_json(_md(mid) / "launches.json", {})}
+
+
+def _heirs(records: list[dict]) -> dict[str, str]:
+    """workspace id -> the open agent that takes over closed agents' tasks there: the
+    workspace's original agent (not one spook started), earliest first."""
+    started = _spook_started_panes()
+    heirs: dict[str, str] = {}
+    for r in sorted((r for r in records if not r.get("gone")),
+                    key=lambda r: (r.get("pane_id") in started, int(r["alias"][1:]))):
+        heirs.setdefault(r.get("workspace_id"), r["alias"])
+    return heirs
+
+
+def _take_over(tasks: list[dict], records: list[dict]) -> dict[str, dict]:
+    """Move tasks off closed agents, in place. A task keeps its open owners; if it has
+    none, the closed owner's workspace heir takes it, or it becomes unowned.
+    Returns task id -> {"from": [aliases], "to": alias or None} for what changed."""
+    by_alias = {r["alias"]: r for r in records}
+    heirs = _heirs(records)
+    changed = {}
+    for t in tasks:
+        owners = t.get("owners", [])
+        closed = [o for o in owners if by_alias.get(o, {}).get("gone")]
+        if not closed:
+            continue
+        keep = [o for o in owners if o not in closed]
+        to = None
+        if not keep:
+            to = heirs.get(by_alias[closed[0]].get("workspace_id"))
+            keep = [to] if to else []
+        t["owners"] = keep
+        changed[t["id"]] = {"from": closed, "to": to}
+    return changed
+
+
+def load_takeovers(mission: str | None = None) -> dict[str, dict]:
+    """task id -> {"from", "to", "at"}: tasks moved off agents that closed."""
+    return read_json(_md(mission) / "takeovers.json", {})
+
+
+def _record_takeovers(mission: str, changed: dict[str, dict]) -> None:
+    if not changed:
+        return
+    tk = load_takeovers(mission)
+    for tid, c in changed.items():
+        prev = tk.get(tid, {})
+        tk[tid] = {"from": sorted(set(prev.get("from", [])) | set(c["from"]), key=lambda a: int(a[1:])),
+                   "to": c["to"] if c["to"] or not prev else prev.get("to"), "at": time.time()}
+    write_json(_md(mission) / "takeovers.json", tk)
+
+
+def reassign_closed(mission: str) -> dict[str, dict]:
+    """Apply the takeover rule to a Mission's graph now (no model call)."""
+    d = _md(mission)
+    records = mission_records(mission)
+    with file_lock(d / "graph.lock"):
+        g = read_json(d / "graph.json", {})
+        changed = _take_over([t for t in g.get("tasks", []) if not t.get("departed")], records)
+        if changed:
+            write_json(d / "graph.json", g)
+            _record_takeovers(mission, changed)
+    for tid, c in changed.items():
+        log(f"[{mission}] {tid}: {', '.join(c['from'])} closed -> {c['to'] or 'unowned'}")
+    return changed
+
+
 def process(items: list[str]) -> None:
     activity.record("sync", items=items)
     activity.trim()
@@ -425,14 +513,9 @@ def process(items: list[str]) -> None:
             log(f"agent {a['pane_id']} failed: {e!r}")
             set_status(error=f"{a['pane_id']}: {e}")
 
-    # Mark agents whose panes are gone. They stay in their Missions' graphs as "closed".
-    live_ids = {a["agent_session"]["value"] for a in live_all}
-    for p in (state_dir() / "agents").glob("*.json"):
-        r = read_json(p, {})
-        gone = r.get("session_id") not in live_ids
-        if r.get("gone") != gone:
-            r["gone"] = gone
-            write_json(p, r)
+    mark_gone(live_all)
+    for mid in missions.all_missions():
+        reassign_closed(mid)
 
     # Each Mission rebuilds only if its agents or membership changed (fingerprint).
     for mid in missions.all_missions():
@@ -566,6 +649,8 @@ def rebuild_graph(mission: str | None = None, force: bool = False) -> None:
             t["depends_on"] = list(dict.fromkeys(a.get("depends_on", []) + t.get("depends_on", [])))
         # Fields set with `spook task update` win too.
         _apply_edits(kept, graph, load_edits(mid))
+        # Closed agents own nothing: their tasks go to the workspace's original agent.
+        _record_takeovers(mid, _take_over([t for t in kept if not t.get("departed")], records))
         # The human's status decisions win; the model flags conflicts as alerts instead.
         ov = load_overrides(mid)
         for t in kept:

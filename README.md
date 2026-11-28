@@ -163,6 +163,23 @@ Upgrading from 1.0: the first run moves your existing board into a Mission
 called "Default". It adds the agents from the workspaces you were tracking,
 and keeps all your data.
 
+### When an agent closes
+
+When an agent's pane closes (or its tab or workspace, or Claude exits), spook
+notices right away and marks it **closed**: greyed out at the bottom of the
+Agents tab, and counted separately in the status line. Its summary stays as
+history, but it owns nothing anymore:
+
+- A task that has other open owners just drops it.
+- Otherwise the task goes to the workspace's **original agent**: the earliest
+  open agent there that spook didn't start itself with `a` or `g`. If all of
+  them were started by spook, the earliest of those.
+- With no open agent in that workspace, the task becomes unowned (so `g`
+  offers to start one).
+
+The task's details say who took it over from whom. The model is told closed
+agents own nothing, and spook reapplies this after every rebuild.
+
 ### Marking tasks done by hand
 
 Press `c` to mark a task done, for example when the work happened outside the
@@ -386,6 +403,7 @@ Per Mission, in `missions/<id>/`:
 | `hidden_tasks.json` | Completed tasks you hid with `x` |
 | `added_tasks.json` | Tasks added with `spook task add` (kept by the model) |
 | `task_tags.json` | Your tags on tasks (`#`) |
+| `takeovers.json` | Tasks moved off agents that closed, and to whom |
 | `messages.json` | Messages agents left for each other with `spook tell`, and when you delivered them |
 | `task_edits.json` | Task fields set with `spook task update` (kept by the model until released) |
 | `trash.json` | Trashed tasks, with a snapshot of each |

@@ -14,6 +14,24 @@ command = ["bash", "bin/spook", "sync"]
 on = "pane.agent_status_changed"
 command = ["bash", "bin/spook", "hook"]
 
+# A closed pane (or its tab or workspace), or Claude exiting: mark its agent closed now
+# instead of at the next sync. No model calls.
+[[events]]
+on = "pane.closed"
+command = ["bash", "bin/spook", "closed"]
+
+[[events]]
+on = "pane.exited"
+command = ["bash", "bin/spook", "closed"]
+
+[[events]]
+on = "tab.closed"
+command = ["bash", "bin/spook", "closed"]
+
+[[events]]
+on = "workspace.closed"
+command = ["bash", "bin/spook", "closed"]
+
 [[actions]]
 id = "open"
 title = "Spook: toggle task board"

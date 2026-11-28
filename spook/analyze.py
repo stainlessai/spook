@@ -138,6 +138,8 @@ ignore the rest of an agent's work. If there is no scope, include everything.
 - When a `need` has no task or owner anywhere, create an unowned task for it and raise an alert.
 - Raise alerts for: unowned needs, two agents making conflicting changes, an agent's change that \
 another agent probably doesn't know about, and agents blocked on each other.
+- An agent whose `herdr_status` is "closed" is gone: don't make it an owner. Spook hands its tasks \
+to another open agent itself, so keep the owners you're given in the previous graph.
 - An agent with `launched_for_task` was started by the human specifically for that task id: \
 make it an owner of that task (keep the id) unless its record clearly shows it went elsewhere.
 - Never create a task whose subject is the board itself: adding a task to it (e.g. `spook task add`), \

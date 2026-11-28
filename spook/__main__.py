@@ -1,6 +1,7 @@
 """spook <command>
 
   hook                 herdr event hook: queue the pane if its agent is on a Mission
+  closed               herdr event hook (pane/tab/workspace closed): mark agents that are gone
   sync                 re-check every agent on a Mission and rebuild graphs
   track   [opts]       add agents to the active Mission (or --mission ID)
   untrack [opts]       remove them
@@ -39,12 +40,13 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 
 from . import herdr, messages, missions
 from .paths import log, read_json, state_dir
 from .analyze import STATUS
 from .worker import (
-    FINISHED, add_task, enqueue, live_agents, mission_records, rebuild_graph, release_status, run_worker,
+    FINISHED, mark_gone, reassign_closed, add_task, enqueue, live_agents, mission_records, rebuild_graph, release_status, run_worker,
     set_task_status, update_task,
 )
 
@@ -91,6 +93,20 @@ def cmd_hook() -> None:
         return
     enqueue(pane)
     run_worker()
+
+
+def cmd_closed() -> None:
+    # Cheap: one `herdr agent list`, no model calls. The graph learns about it at the next rebuild.
+    # The event can arrive before herdr drops the agent from its list: look again briefly.
+    for _ in range(3):
+        gone = mark_gone()
+        if gone:
+            break
+        time.sleep(1)
+    if gone:
+        log(f"agents closed: {', '.join(gone)}")
+        for mid in missions.all_missions():
+            reassign_closed(mid)
 
 
 def cmd_sync() -> None:
@@ -367,6 +383,8 @@ def main(argv: list[str]) -> None:
     cmd = argv[0] if argv else "board"
     if cmd == "hook":
         cmd_hook()
+    elif cmd == "closed":
+        cmd_closed()
     elif cmd == "sync":
         cmd_sync()
     elif cmd in ("track", "untrack"):
